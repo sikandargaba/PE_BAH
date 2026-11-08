@@ -237,7 +237,30 @@ async function adminSettings() {
       catch (x) { alert(x.message); } } }),
     h("h3", { text: "Cloud e-mail" }),
     h("p", {}, "Cloud e-mail sending is ", badge(mailOn ? "enabled" : "not enabled"),
-      ". E-mails are queued for every finished run; the central cloud sender delivers them once it is approved and enabled. The local BAH keeps sending its own e-mails as before.")];
+      `. SMTP: ${get("smtp").host || "—"}:${get("smtp").port || ""} as ${get("smtp").username || "—"} (password held only as a server secret). ` +
+      "E-mails are queued for every finished run with e-mail on; while sending is enabled the central sender delivers them every minute. The local BAH keeps sending its own e-mails as before."),
+    h("div", { class: "actions" },
+      h("button", { class: "secondary", text: "Test SMTP connection (sends nothing)", onclick: async (e) => {
+        e.target.disabled = true;
+        try { const r = await mailCall("test"); alert(`${r.ok ? "OK" : "Failed"}: ${r.message}`); }
+        catch (x) { alert(x.message); } finally { e.target.disabled = false; } } }),
+      h("button", { text: mailOn ? "Disable cloud e-mail sending" : "Enable cloud e-mail sending", onclick: async () => {
+        if (!confirm(mailOn ? "Stop cloud e-mail sending? Queued e-mails wait until it is enabled again."
+                            : "Enable cloud e-mail sending? Queued report e-mails will be sent to their real recipients within a minute.")) return;
+        try { await upsert("settings", { key: "email_delivery", value: { enabled: !mailOn }, updated_by: me.user_id }, "key"); render(); }
+        catch (x) { alert(x.message); } } }),
+      mailOn ? h("button", { class: "secondary", text: "Send queued e-mails now", onclick: async (e) => {
+        e.target.disabled = true;
+        try { const r = await mailCall("send-now"); alert(r.reason ? r.reason : `Processed ${r.processed} e-mail(s).`); render(); }
+        catch (x) { alert(x.message); } finally { e.target.disabled = false; } } }) : null)];
+}
+
+async function mailCall(action) {
+  const r = await fetch(`${FN}/mail-sender/${action}`, { method: "POST", body: "{}",
+    headers: { apikey: KEY, authorization: `Bearer ${await token()}`, "content-type": "application/json" } });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.message || `Request failed (${r.status})`);
+  return j;
 }
 
 // ------------------------------------------------------------------ report templates
