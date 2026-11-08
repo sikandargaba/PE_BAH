@@ -51,6 +51,7 @@ async function editTask(id, people) {
   let em = { enabled: false, to: [], cc: [], bcc: [], subject: "", body: "", failure_subject: "", failure_body: "",
              notify_success: true, notify_failure: false, delivery_format: "attachment" };
   let sc = null, asg = [];
+  const templates = await api("/report_templates?select=id,name,version,config&status=eq.active&order=name");
   if (id) {
     t = (await api(`/tasks?select=*&id=eq.${id}`))[0];
     const c = (await api(`/task_configs?select=config,email&task_id=eq.${id}`))[0];
@@ -79,6 +80,17 @@ async function editTask(id, people) {
     efmt: sel(em.delivery_format, [["attachment", "Excel attachment only"], ["body", "Data in e-mail body only"], ["both", "Both"]]),
   };
   f.ebody.value = em.body || ""; f.fbody.value = em.failure_body || "";
+  f.tpl = sel(t.template_id || "", [["", "— no template (enter parameters below) —"], ...templates.map((x) => [x.id, `${x.name} (v${x.version})`])]);
+  f.tpl.addEventListener("change", () => {          // pre-fill the SAP parameters from the chosen template
+    const tp = templates.find((x) => x.id === f.tpl.value);
+    if (!tp) return;
+    const c = tp.config || {};
+    f.tcode.value = c.tcode || ""; f.report.value = c.report_name || ""; f.variant.value = c.variant || "";
+    f.dates.value = (c.date_fields || []).join(", "); f.rule.value = c.date_rule || "previous_month";
+    f.from.value = c.custom_from || ""; f.to.value = c.custom_to || "";
+    f.pattern.value = (c.output || {}).filename_pattern || "{ReportName}_{Period}";
+    if (!f.name.value) f.name.value = tp.name;
+  });
   const assignBoxes = people.filter((p) => p.status === "active").map((p) => {
     const a = asg.find((x) => x.employee_id === p.id);
     return { p, a, box: chk(a && a.status === "active") };
@@ -93,8 +105,10 @@ async function editTask(id, people) {
       if (bad.length) throw new Error(`Invalid e-mail address: ${bad.join(", ")}`);
       if (f.eon.checked && !rcpt.to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
       if (f.rule.value === "custom" && (!f.from.value || !f.to.value)) throw new Error("Custom date rule needs From and To dates.");
+      const tp = templates.find((x) => x.id === f.tpl.value);
       const row = { name: f.name.value.trim(), description: f.description.value.trim() || null, connection_id: conn.id,
-                    execution_target: f.target.value, execution_mode: f.mode.value, status: f.status.value };
+                    execution_target: f.target.value, execution_mode: f.mode.value, status: f.status.value,
+                    template_id: tp ? tp.id : null, template_version: tp ? tp.version : null };
       const saved = id ? (await api(`/tasks?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(row), headers: { prefer: "return=representation" } }))[0]
                        : (await api("/tasks", { method: "POST", body: JSON.stringify({ ...row, created_by: me.user_id }), headers: { prefer: "return=representation" } }))[0];
       const tid = saved.id;
@@ -129,7 +143,7 @@ async function editTask(id, people) {
       field("Runs on", f.target, "Live SAP runs only by Run Now, attended, on the assigned employee's own runner."),
       field("Execution mode", f.mode), field("Status", f.status)),
     h("h3", { text: "SAP report" }),
-    h("div", { class: "grid" }, field("T-Code", f.tcode), field("Report name", f.report),
+    h("div", { class: "grid" }, field("Report template", f.tpl, "Choosing a template fills in the parameters below."), field("T-Code", f.tcode), field("Report name", f.report),
       field("Variant", f.variant, "Plant, movement types and LAYOUT come from the SAP variant (BAH never changes them)."),
       field("Date fields (comma-separated selection labels)", f.dates), field("Date rule", f.rule),
       field("Custom from", f.from), field("Custom to", f.to), field("Workbook name pattern", f.pattern, "{ReportName} and {Period} are replaced.")),
@@ -226,6 +240,48 @@ async function adminSettings() {
       ". E-mails are queued for every finished run; the central cloud sender delivers them once it is approved and enabled. The local BAH keeps sending its own e-mails as before.")];
 }
 
-const ADMIN_TABS = [["admin_tasks", "Tasks"], ["admin_runs", "Task status"], ["admin_people", "People & runners"], ["reports", "Reports"],
+// ------------------------------------------------------------------ report templates
+async function adminTemplates() {
+  const rows = await api("/report_templates?select=id,name,description,version,status,config&order=name");
+  return [h("p", {}, h("button", { text: "New template", onclick: () => editTemplate(null) })),
+    ...table([["Template", (t) => h("div", {}, h("strong", { text: t.name }), t.description ? h("div", { class: "muted", text: t.description }) : null)],
+              ["SAP", (t) => `${t.config.tcode || ""} ${t.config.variant || ""}`],
+              ["Date rule", (t) => String(t.config.date_rule || "").replaceAll("_", " ")],
+              ["Version", (t) => `v${t.version}`], ["Status", (t) => badge(t.status)],
+              ["", (t) => h("button", { class: "secondary", text: "Edit", onclick: () => editTemplate(t) })]],
+             rows, "No templates yet.")];
+}
+
+function editTemplate(t) {
+  const c = (t && t.config) || { date_rule: "previous_month", output: {} };
+  const f = { name: inp(t && t.name, { maxlength: "120", required: true }), desc: inp(t && t.description, { maxlength: "200" }),
+    tcode: inp(c.tcode, { required: true, maxlength: "40" }), report: inp(c.report_name), variant: inp(c.variant),
+    dates: inp((c.date_fields || []).join(", ")), rule: sel(c.date_rule, DATE_RULES.map((r) => [r, r.replaceAll("_", " ")])),
+    from: inp(c.custom_from, { type: "date" }), to: inp(c.custom_to, { type: "date" }),
+    pattern: inp((c.output || {}).filename_pattern || "{ReportName}_{Period}"),
+    status: sel(t ? t.status : "active", [["active", "Active"], ["inactive", "Inactive"]]) };
+  const err = h("div", { class: "err" });
+  app.replaceChildren(h("form", { class: "card", onsubmit: async (e) => {
+    e.preventDefault(); err.textContent = "";
+    try {
+      if (f.rule.value === "custom" && (!f.from.value || !f.to.value)) throw new Error("Custom date rule needs From and To dates.");
+      const config = { ...c, tcode: f.tcode.value.trim().toUpperCase(), report_name: f.report.value.trim() || f.name.value.trim(),
+        variant: f.variant.value.trim() || null, date_fields: f.dates.value.split(",").map((x) => x.trim()).filter(Boolean),
+        date_rule: f.rule.value, custom_from: f.rule.value === "custom" ? f.from.value : null,
+        custom_to: f.rule.value === "custom" ? f.to.value : null, output: { ...(c.output || {}), filename_pattern: f.pattern.value.trim() } };
+      const row = { name: f.name.value.trim(), description: f.desc.value.trim() || null, connector: "sap_fiori", config, status: f.status.value };
+      if (t) await api(`/report_templates?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ ...row, version: t.version + 1 }) });
+      else await api("/report_templates", { method: "POST", body: JSON.stringify({ ...row, created_by: me.user_id }) });
+      tab = "admin_templates"; render();
+    } catch (x) { err.textContent = x.message; }
+  } }, h("h2", { text: t ? `Edit template: ${t.name}` : "New template" }),
+    h("div", { class: "grid" }, field("Name", f.name), field("Description", f.desc), field("T-Code", f.tcode), field("Report name", f.report),
+      field("Variant", f.variant, "Layout and selections come from the SAP variant."), field("Date fields (comma-separated)", f.dates),
+      field("Date rule", f.rule), field("Custom from", f.from), field("Custom to", f.to), field("Workbook name pattern", f.pattern), field("Status", f.status)),
+    h("p", { class: "muted", text: "Editing a template does not change existing tasks: each task keeps the parameters it was saved with." }),
+    h("p", { class: "actions" }, h("button", { text: "Save template" }), h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() })), err));
+}
+
+const ADMIN_TABS = [["admin_tasks", "Tasks"], ["admin_templates", "Templates"], ["admin_runs", "Task status"], ["admin_people", "People & runners"], ["reports", "Reports"],
                     ["notifications", "Notifications"], ["admin_settings", "Settings"]];
-const ADMIN_VIEWS = { admin_tasks: adminTasks, admin_people: adminPeople, admin_settings: adminSettings, admin_runs: adminRuns };
+const ADMIN_VIEWS = { admin_tasks: adminTasks, admin_templates: adminTemplates, admin_people: adminPeople, admin_settings: adminSettings, admin_runs: adminRuns };

@@ -132,14 +132,56 @@ const schedText = (s) => !s ? "manual only" : s.frequency === "weekly" ? `weekly
   : s.frequency === "monthly" ? `monthly, ${s.last_day_of_month ? "last day" : "day " + s.month_day}, ${s.run_time.slice(0, 5)}`
   : `${s.frequency}, ${s.run_time.slice(0, 5)}`;
 
+// Next scheduled run (same rules as the database scheduler, Asia/Karachi = UTC+5, no DST). Live SAP is never scheduled.
+function nextRun(t) {
+  const s = (t.schedules || [])[0];
+  if (t.execution_target === "live_sap") return "Manual Run Now only (live SAP)";
+  if (!s || s.status !== "active" || t.status !== "active" || t.execution_mode === "manual_only") return "Not scheduled";
+  const [hh, mm] = s.run_time.split(":").map(Number);
+  const now = Date.now(), dayMs = 86400000;
+  const k0 = new Date(now + 5 * 3600000);                       // Karachi wall clock
+  let d = Date.UTC(k0.getUTCFullYear(), k0.getUTCMonth(), k0.getUTCDate());
+  for (let i = 0; i < 400; i++, d += dayMs) {
+    const day = new Date(d), dow = ((day.getUTCDay() + 6) % 7) + 1;
+    const last = new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth() + 1, 0)).getUTCDate();
+    const ok = s.frequency === "daily" || (s.frequency === "weekly" && dow === s.weekday)
+      || (s.frequency === "fortnightly" && s.anchor_date && d >= Date.parse(s.anchor_date) && Math.round((d - Date.parse(s.anchor_date)) / dayMs) % 14 === 0)
+      || (s.frequency === "monthly" && (s.last_day_of_month ? day.getUTCDate() === last : day.getUTCDate() === Math.min(s.month_day, last)));
+    const at = d + (hh * 60 + mm) * 60000 - 5 * 3600000;        // Karachi time -> UTC
+    if (ok && at > now) return fmt(new Date(at).toISOString());
+  }
+  return "—";
+}
+
+async function taskDetail(t) {
+  const runs = await api(`/occurrences?select=id,kind,status,due_at,attempts,max_attempts,completed_at,executions(attempt_no,status,started_at,finished_at,row_count,column_count,validation_status,error_class,error_detail,engine),report_files(id,file_name,status)&task_id=eq.${t.id}&order=due_at.desc&limit=50`);
+  const back = h("button", { class: "secondary", text: "Back", onclick: () => render() });
+  const body = h("div", { class: "card" },
+    h("h2", { text: t.name }), t.description ? h("p", { class: "muted", text: t.description }) : null,
+    h("p", {}, "Status ", badge(t.status), ` · ${t.execution_mode.replaceAll("_", " ")} · schedule: ${schedText((t.schedules || [])[0])} · next run: ${nextRun(t)}`),
+    h("h3", { text: "Execution history" }),
+    ...table([["Due", (o) => fmt(o.due_at)], ["Type", (o) => o.kind], ["Status", (o) => badge(o.status)],
+              ["Attempts", (o) => (o.executions || []).sort((a, b) => a.attempt_no - b.attempt_no).map((e) =>
+                 h("div", {}, `#${e.attempt_no} `, badge(e.status), ` ${fmt(e.started_at)} → ${fmt(e.finished_at)}`,
+                   e.row_count != null ? ` · ${e.row_count} rows × ${e.column_count} cols` : "",
+                   e.error_class ? h("div", { class: "muted", text: `${e.error_class}${e.error_detail ? " - " + e.error_detail : ""}` }) : null))],
+              ["Report", (o) => (o.report_files || []).filter((f) => f.status === "available").map((f) =>
+                 h("button", { class: "secondary", text: "Download", onclick: (e) => download(f.id, e.target) }))]],
+             runs, "No runs yet."),
+    h("p", {}, back));
+  app.replaceChildren(body);
+}
+
 const VIEWS = {
   async tasks() {
-    const rows = await api("/tasks?select=id,name,description,execution_target,execution_mode,status,schedules(frequency,run_time,weekday,month_day,last_day_of_month,status)&order=name");
+    const rows = await api("/tasks?select=id,name,description,execution_target,execution_mode,status,schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status)&order=name");
     return table([["Task", (t) => h("div", {}, h("strong", { text: t.name }), t.description ? h("div", { class: "muted", text: t.description }) : null)],
-                  ["Mode", (t) => t.execution_mode.replaceAll("_", " ")],
                   ["Schedule", (t) => schedText((t.schedules || [])[0])],
+                  ["Next run", (t) => nextRun(t)],
                   ["Runs on", (t) => t.execution_target === "live_sap" ? "SAP (attended runner)" : t.execution_target],
-                  ["Status", (t) => badge(t.status)]], rows, "No tasks are assigned to you yet.");
+                  ["Status", (t) => badge(t.status)],
+                  ["", (t) => h("button", { class: "secondary", text: "Details", onclick: () => taskDetail(t) })]],
+                 rows, "No tasks are assigned to you yet.");
   },
   async runs() {
     const rows = await api("/occurrences?select=id,kind,status,due_at,attempts,max_attempts,completed_at,tasks(name),executions(attempt_no,status,finished_at,row_count,validation_status,error_class)&order=due_at.desc&limit=100");
