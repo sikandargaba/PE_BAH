@@ -9,8 +9,45 @@ const EMAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
 const list = (s) => String(s || "").split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/-/g, "").slice(0, 32);
 
+// Same form markup as the local BAH portal (core.js field()).
 function field(label, input, hint) {
-  return h("div", { class: "field" }, h("label", { text: label }), input, hint ? h("div", { class: "muted", text: hint }) : null);
+  const check = input.type === "checkbox";
+  return h("label", { class: check ? "field check" : "field" }, ...(check ? [input, label] : [label, input]),
+    hint ? h("span", { class: "hint", text: hint }) : null);
+}
+const RULE_LABELS = { today: "Today (execution date)", previous_day: "Previous Day", current_month: "Current Month (to date)",
+  previous_month: "Previous Month", current_week: "Current Week (to date)", previous_week: "Previous Week",
+  rolling_7_days: "Rolling last 7 days", rolling_30_days: "Rolling last 30 days", rolling_90_days: "Rolling last 90 days", custom: "Custom range" };
+const SYNC_NOTE = "Synchronised from the local BAH: description, execution mode, status, report parameters, e-mail settings and schedule " +
+  "are maintained in the local BAH portal and overwrite this copy within 15 minutes (local wins). The local BAH runs this report; the cloud sends its e-mail.";
+
+// ------------------------------------------------------------------ dashboard (same KPI layout as the local BAH)
+async function adminDashboard() {
+  const since = new Date(Date.now() - 7 * 86400000).toISOString();
+  const [people, tasks, runners, occ, mails] = await Promise.all([
+    api("/profiles?select=status"), api("/tasks?select=status,execution_target"), api("/runners?select=status,last_seen_at"),
+    api(`/occurrences?select=status,kind,due_at,tasks(name),executions(status,finished_at,row_count)&due_at=gte.${since}&order=due_at.desc&limit=200`),
+    api(`/notifications?select=status,created_at&created_at=gte.${since}`)]);
+  const n = (rows, f) => rows.filter(f).length;
+  const kpi = (label, value, cls = "") => h("div", { class: `kpi ${cls}` }, h("div", { class: "label", text: label }), h("div", { class: "value", text: String(value) }));
+  const group = (title, ...kpis) => h("div", { class: "card" }, h("h2", { text: title }), h("div", { class: "kpis" }, ...kpis));
+  const online = runners.filter((r) => r.status === "active" && r.last_seen_at && Date.now() - new Date(r.last_seen_at).getTime() < 10 * 60000);
+  return [
+    h("div", { class: "grid2" },
+      group("People & runners", kpi("Employees", people.length), kpi("Active employees", n(people, (p) => p.status === "active"), "ok"),
+        kpi("Runners online", online.length, online.length ? "ok" : "warn")),
+      group("Tasks", kpi("Total tasks", tasks.length), kpi("Active", n(tasks, (t) => t.status === "active"), "ok"),
+        kpi("Inactive", n(tasks, (t) => t.status === "inactive")), kpi("Live SAP", n(tasks, (t) => t.execution_target === "live_sap" && t.status === "active"), "bad"))),
+    h("div", { class: "grid2" },
+      group("Runs - last 7 days", kpi("Success", n(occ, (o) => o.status === "succeeded"), "ok"), kpi("Failed", n(occ, (o) => o.status === "failed"), "bad"),
+        kpi("Running", n(occ, (o) => o.status === "claimed")), kpi("Queued", n(occ, (o) => ["pending", "waiting_retry"].includes(o.status)), "warn")),
+      group("Cloud e-mail - last 7 days", kpi("Sent", n(mails, (m) => m.status === "sent"), "ok"), kpi("Queued", n(mails, (m) => ["queued", "sending"].includes(m.status)), "warn"),
+        kpi("Failed", n(mails, (m) => m.status === "failed"), "bad"))),
+    h("div", { class: "card" }, h("h2", { text: "Recent execution history" }),
+      ...table([["Task", (o) => (o.tasks || {}).name || "—"], ["Type", (o) => o.kind === "relay" ? "local BAH run" : o.kind],
+                ["Due", (o) => fmt(o.due_at)], ["Status", (o) => badge(o.status)],
+                ["Rows", (o) => { const e = (o.executions || [])[0]; return e && e.row_count != null ? String(e.row_count) : "—"; }]],
+               occ.slice(0, 10), "No executions yet."))];
 }
 function inp(value, attrs = {}) { return h("input", { value: value ?? "", ...attrs }); }
 function sel(value, options) {
@@ -27,20 +64,23 @@ async function upsert(table, row, onConflict) {
 // ------------------------------------------------------------------ tasks (create / edit / assign / Run Now)
 async function adminTasks() {
   const [tasks, people] = await Promise.all([
-    api("/tasks?select=id,name,description,execution_target,execution_mode,status,schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&order=name"),
+    api("/tasks?select=id,name,description,execution_target,execution_mode,status,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&order=name"),
     api("/profiles?select=id,full_name,email,role,status&order=full_name")]);
   const name = (id) => (people.find((p) => p.id === id) || {}).full_name || "?";
-  return [h("p", {}, h("button", { text: "New task", onclick: () => editTask(null, people) })),
-    ...table([["Task", (t) => h("div", {}, h("strong", { text: t.name }), t.description ? h("div", { class: "muted", text: t.description }) : null)],
-              ["Runs on", (t) => t.execution_target === "live_sap" ? "Live SAP (attended)" : t.execution_target],
+  return { actions: [h("button", { class: "primary", text: "New task", onclick: () => editTask(null, people) })],
+    content: table([["Description", (t) => h("div", {}, h("strong", { text: t.name }), t.description && t.description !== t.name ? h("div", { class: "muted", text: t.description }) : null)],
+              ["T-Code", (t) => ((t.task_configs || {}).config || {}).tcode || "—"],
               ["Schedule", (t) => schedText((t.schedules || [])[0])],
-              ["Assigned to", (t) => (t.assignments || []).filter((a) => a.status === "active").map((a) => name(a.employee_id)).join(", ") || "—"],
+              ["Next run", (t) => nextRun(t)],
+              ["Type", (t) => targetBadge(t.execution_target)],
+              ["E-mail", (t) => { const e = (t.task_configs || {}).email || {}; return e.enabled ? `${(e.to || []).length} To / ${(e.cc || []).length} CC` : "off"; }],
+              ["Assignments", (t) => (t.assignments || []).filter((a) => a.status === "active").map((a) => name(a.employee_id)).join(", ") || "—"],
               ["Status", (t) => badge(t.status)],
               ["", (t) => h("div", { class: "actions" },
-                 h("button", { class: "secondary", text: "Edit", onclick: () => editTask(t.id, people) }),
-                 h("button", { text: "Run Now", disabled: t.status !== "active" || t.execution_mode === "scheduled_only",
+                 h("button", { class: "small", text: "Edit", onclick: () => editTask(t.id, people) }),
+                 h("button", { class: "small", text: "Run Now", disabled: t.status !== "active" || t.execution_mode === "scheduled_only",
                                onclick: () => runNow(t) }))]],
-             tasks, "No tasks yet - create the first one.")];
+             tasks, "No tasks yet - create the first one.") };
 }
 
 async function editTask(id, people) {
@@ -66,7 +106,7 @@ async function editTask(id, people) {
     status: sel(t.status, [["active", "Active"], ["paused", "Paused"], ["inactive", "Inactive"]]),
     tcode: inp(cfg.tcode, { maxlength: "40", required: true }), report: inp(cfg.report_name, { maxlength: "80" }),
     variant: inp(cfg.variant, { maxlength: "40" }), dates: inp((cfg.date_fields || []).join(", ")),
-    rule: sel(cfg.date_rule, DATE_RULES.map((r) => [r, r.replaceAll("_", " ")])),
+    rule: sel(cfg.date_rule, DATE_RULES.map((r) => [r, RULE_LABELS[r] || r])),
     from: inp(cfg.custom_from, { type: "date" }), to: inp(cfg.custom_to, { type: "date" }),
     pattern: inp((cfg.output || {}).filename_pattern || "{ReportName}_{Period}"),
     freq: sel(sc ? sc.frequency : "", [["", "No schedule"], ["daily", "Daily"], ["weekly", "Weekly"], ["fortnightly", "Fortnightly"], ["monthly", "Monthly"]]),
@@ -96,9 +136,10 @@ async function editTask(id, people) {
     return { p, a, box: chk(a && a.status === "active") };
   });
   const err = h("div", { class: "err" });
-  const save = h("button", { text: id ? "Save changes" : "Create task" });
-  const form = h("form", { class: "card", onsubmit: async (e) => {
-    e.preventDefault(); err.textContent = ""; save.disabled = true;
+  const save = h("button", { class: "primary", text: id ? "Save changes" : "Create task" });
+  const save2 = save;
+  const form = h("form", { onsubmit: async (e) => {
+    e.preventDefault(); err.textContent = ""; save2.disabled = true;
     try {
       const rcpt = { to: list(f.eto.value), cc: list(f.ecc.value), bcc: list(f.ebcc.value) };
       const bad = [...rcpt.to, ...rcpt.cc, ...rcpt.bcc].filter((a) => !EMAIL_RE.test(a));
@@ -136,30 +177,31 @@ async function editTask(id, people) {
           await api(`/assignments?id=eq.${a.id}`, { method: "PATCH", body: JSON.stringify({ status: box.checked ? "active" : "inactive" }) });
       }
       tab = "admin_tasks"; render();
-    } catch (x) { err.textContent = x.message; } finally { save.disabled = false; }
+    } catch (x) { err.textContent = x.message; } finally { save2.disabled = false; }
   } },
-    h("h2", { text: id ? `Edit task: ${t.name}` : "New task" }),
+    pageHead(id ? `Edit task: ${t.name}` : "New task", "", save, h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() })),
+    id && t.execution_target === "live_sap" ? h("div", { class: "notice", text: SYNC_NOTE }) : null,
+    h("div", { class: "card" }, h("h2", { text: "Task" }),
     h("div", { class: "grid" }, field("Task name", f.name), field("Description (shown in e-mails)", f.description),
       field("Runs on", f.target, "Live SAP runs only by Run Now, attended, on the assigned employee's own runner."),
-      field("Execution mode", f.mode), field("Status", f.status)),
-    h("h3", { text: "SAP report" }),
+      field("Execution mode", f.mode), field("Status", f.status))),
+    h("div", { class: "card" }, h("h2", { text: "SAP report" }),
     h("div", { class: "grid" }, field("Report template", f.tpl, "Choosing a template fills in the parameters below."), field("T-Code", f.tcode), field("Report name", f.report),
       field("Variant", f.variant, "Plant, movement types and LAYOUT come from the SAP variant (BAH never changes them)."),
       field("Date fields (comma-separated selection labels)", f.dates), field("Date rule", f.rule),
-      field("Custom from", f.from), field("Custom to", f.to), field("Workbook name pattern", f.pattern, "{ReportName} and {Period} are replaced.")),
-    h("h3", { text: "Schedule" }),
-    h("div", { class: "grid" }, field("Frequency", f.freq, "Scheduled live SAP runs are disabled; schedules apply to test tasks."),
+      field("Custom from", f.from), field("Custom to", f.to), field("Workbook name pattern", f.pattern, "{ReportName} and {Period} are replaced."))),
+    h("div", { class: "card" }, h("h2", { text: "Schedule" }),
+    h("div", { class: "grid" }, field("Frequency", f.freq, "Live SAP schedules are executed by the local BAH; the cloud never runs live SAP on a schedule."),
       field("Time (Asia/Karachi)", f.time), field("Weekday (weekly)", f.weekday), field("Anchor date (fortnightly)", f.anchor),
-      field("Day of month (monthly)", f.mday), field("Last day of month (monthly)", f.lastday)),
-    h("h3", { text: "Assigned employees" }),
-    h("div", { class: "grid" }, assignBoxes.map(({ p, box }) => h("label", { class: "inline" }, box, ` ${p.full_name} (${p.role})`))),
-    h("h3", { text: "E-mail" }),
+      field("Day of month (monthly)", f.mday), field("Last day of month (monthly)", f.lastday))),
+    h("div", { class: "card" }, h("h2", { text: "Assigned employees" }),
+    h("div", { class: "grid" }, assignBoxes.map(({ p, box }) => h("label", { class: "field check" }, box, ` ${p.full_name} (${p.role})`)))),
+    h("div", { class: "card" }, h("h2", { text: "E-mail" }),
     h("div", { class: "grid" }, field("Send e-mail", f.eon), field("Delivery format", f.efmt), field("To", f.eto), field("CC", f.ecc), field("BCC", f.ebcc),
       field("Subject", f.esub, "Placeholders: {report_name} {period_start} {period_end} {execution_date} {assigned_employee} {execution_status}"),
       field("Body (blank = standard text)", f.ebody), field("Notify on success", f.nsucc), field("Notify on failure", f.nfail),
-      field("Failure subject", f.fsub), field("Failure body", f.fbody)),
-    h("p", { class: "actions" }, save, h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() })), err);
-  app.replaceChildren(form);
+      field("Failure subject", f.fsub), field("Failure body", f.fbody))), err);
+  mainArea().replaceChildren(form);
 }
 
 async function runNow(t) {
@@ -228,17 +270,17 @@ async function adminSettings() {
   const get = (k) => (rows.find((r) => r.key === k) || {}).value || {};
   const liveOn = get("live_sap").manual_enabled === true;
   const mailOn = get("email_delivery").enabled === true;
-  return [h("h3", { text: "Live SAP" }),
+  return [h("div", { class: "card" }, h("h2", { text: "Live SAP" }),
     h("p", {}, "Manual live SAP Run Now is ", badge(liveOn ? "authorised" : "not authorised"),
       ". Scheduled live SAP runs are impossible by design."),
     h("button", { text: liveOn ? "Withdraw live SAP authorisation" : "Authorise manual live SAP Run Now", onclick: async () => {
       if (!confirm(liveOn ? "Withdraw authorisation for live SAP runs?" : "Authorise MANUAL, ATTENDED live SAP Run Now (each run still needs your confirmation)?")) return;
       try { await upsert("settings", { key: "live_sap", value: { manual_enabled: !liveOn }, updated_by: me.user_id }, "key"); render(); }
-      catch (x) { alert(x.message); } } }),
-    h("h3", { text: "Cloud e-mail" }),
+      catch (x) { alert(x.message); } } })),
+    h("div", { class: "card" }, h("h2", { text: "Cloud e-mail" }),
     h("p", {}, "Cloud e-mail sending is ", badge(mailOn ? "enabled" : "not enabled"),
       `. SMTP: ${get("smtp").host || "—"}:${get("smtp").port || ""} as ${get("smtp").username || "—"} (password held only as a server secret). ` +
-      "E-mails are queued for every finished run with e-mail on; while sending is enabled the central sender delivers them every minute. The local BAH keeps sending its own e-mails as before."),
+      "E-mails are queued for every finished run with e-mail on (including report runs handed over by the local BAH); while sending is enabled the central sender delivers them every minute."),
     h("div", { class: "actions" },
       h("button", { class: "secondary", text: "Test SMTP connection (sends nothing)", onclick: async (e) => {
         e.target.disabled = true;
@@ -252,7 +294,7 @@ async function adminSettings() {
       mailOn ? h("button", { class: "secondary", text: "Send queued e-mails now", onclick: async (e) => {
         e.target.disabled = true;
         try { const r = await mailCall("send-now"); alert(r.reason ? r.reason : `Processed ${r.processed} e-mail(s).`); render(); }
-        catch (x) { alert(x.message); } finally { e.target.disabled = false; } } }) : null)];
+        catch (x) { alert(x.message); } finally { e.target.disabled = false; } } }) : null))];
 }
 
 async function mailCall(action) {
@@ -266,25 +308,25 @@ async function mailCall(action) {
 // ------------------------------------------------------------------ report templates
 async function adminTemplates() {
   const rows = await api("/report_templates?select=id,name,description,version,status,config&order=name");
-  return [h("p", {}, h("button", { text: "New template", onclick: () => editTemplate(null) })),
-    ...table([["Template", (t) => h("div", {}, h("strong", { text: t.name }), t.description ? h("div", { class: "muted", text: t.description }) : null)],
-              ["SAP", (t) => `${t.config.tcode || ""} ${t.config.variant || ""}`],
-              ["Date rule", (t) => String(t.config.date_rule || "").replaceAll("_", " ")],
-              ["Version", (t) => `v${t.version}`], ["Status", (t) => badge(t.status)],
-              ["", (t) => h("button", { class: "secondary", text: "Edit", onclick: () => editTemplate(t) })]],
-             rows, "No templates yet.")];
+  return { actions: [h("button", { class: "primary", text: "New template", onclick: () => editTemplate(null) })],
+    content: table([["Description", (t) => h("div", {}, h("strong", { text: t.name }), t.description ? h("div", { class: "muted", text: t.description }) : null)],
+              ["Source", () => "SAP Fiori"], ["T-Code", (t) => t.config.tcode || "—"], ["Variant", (t) => t.config.variant || "—"],
+              ["Date rule", (t) => RULE_LABELS[t.config.date_rule] || t.config.date_rule || "—"],
+              ["Version", (t) => String(t.version)], ["Status", (t) => badge(t.status)],
+              ["", (t) => h("div", { class: "actions" }, h("button", { class: "small", text: "Edit", onclick: () => editTemplate(t) }))]],
+             rows, "No templates yet - create the first one.") };
 }
 
 function editTemplate(t) {
   const c = (t && t.config) || { date_rule: "previous_month", output: {} };
   const f = { name: inp(t && t.name, { maxlength: "120", required: true }), desc: inp(t && t.description, { maxlength: "200" }),
     tcode: inp(c.tcode, { required: true, maxlength: "40" }), report: inp(c.report_name), variant: inp(c.variant),
-    dates: inp((c.date_fields || []).join(", ")), rule: sel(c.date_rule, DATE_RULES.map((r) => [r, r.replaceAll("_", " ")])),
+    dates: inp((c.date_fields || []).join(", ")), rule: sel(c.date_rule, DATE_RULES.map((r) => [r, RULE_LABELS[r] || r])),
     from: inp(c.custom_from, { type: "date" }), to: inp(c.custom_to, { type: "date" }),
     pattern: inp((c.output || {}).filename_pattern || "{ReportName}_{Period}"),
     status: sel(t ? t.status : "active", [["active", "Active"], ["inactive", "Inactive"]]) };
   const err = h("div", { class: "err" });
-  app.replaceChildren(h("form", { class: "card", onsubmit: async (e) => {
+  mainArea().replaceChildren(h("form", { onsubmit: async (e) => {
     e.preventDefault(); err.textContent = "";
     try {
       if (f.rule.value === "custom" && (!f.from.value || !f.to.value)) throw new Error("Custom date rule needs From and To dates.");
@@ -297,14 +339,23 @@ function editTemplate(t) {
       else await api("/report_templates", { method: "POST", body: JSON.stringify({ ...row, created_by: me.user_id }) });
       tab = "admin_templates"; render();
     } catch (x) { err.textContent = x.message; }
-  } }, h("h2", { text: t ? `Edit template: ${t.name}` : "New template" }),
-    h("div", { class: "grid" }, field("Name", f.name), field("Description", f.desc), field("T-Code", f.tcode), field("Report name", f.report),
+  } }, pageHead(t ? `Edit template - version ${t.version}` : "New report template",
+      "Reusable report definitions. Editing creates a new version; existing tasks keep their copy.",
+      h("button", { class: "primary", text: t ? "Save new version" : "Create template" }),
+      h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() })),
+    h("div", { class: "card" }, h("div", { class: "grid" }, field("Name", f.name), field("Description", f.desc), field("T-Code", f.tcode), field("Report name", f.report),
       field("Variant", f.variant, "Layout and selections come from the SAP variant."), field("Date fields (comma-separated)", f.dates),
       field("Date rule", f.rule), field("Custom from", f.from), field("Custom to", f.to), field("Workbook name pattern", f.pattern), field("Status", f.status)),
-    h("p", { class: "muted", text: "Editing a template does not change existing tasks: each task keeps the parameters it was saved with." }),
-    h("p", { class: "actions" }, h("button", { text: "Save template" }), h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() })), err));
+    h("p", { class: "hint", text: "Editing a template does not change existing tasks: each task keeps the parameters it was saved with." })), err));
 }
 
-const ADMIN_TABS = [["admin_tasks", "Tasks"], ["admin_templates", "Templates"], ["admin_runs", "Task status"], ["admin_people", "People & runners"], ["reports", "Reports"],
-                    ["notifications", "Notifications"], ["admin_settings", "Settings"]];
-const ADMIN_VIEWS = { admin_tasks: adminTasks, admin_templates: adminTemplates, admin_people: adminPeople, admin_settings: adminSettings, admin_runs: adminRuns };
+// Same sections and labels as the local BAH admin navigation.
+const ADMIN_TABS = ["Overview", ["admin_dashboard", "Dashboard", "Operational overview - cloud BAH."],
+  "Automation", ["admin_templates", "Report Templates", "Reusable report definitions. Editing creates a new version; existing tasks keep their copy."],
+  ["admin_tasks", "Tasks", "Report tasks, schedules and employee assignments."],
+  "People & execution", ["admin_people", "Employees", "Accounts, SAP user IDs and each employee's runner."],
+  "Monitoring", ["admin_runs", "Execution History", "Every run, including report runs handed over by the local BAH."],
+  ["reports", "Reports", "Validated workbooks stored in the cloud."], ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH."],
+  "System", ["admin_settings", "Settings", "Live SAP authorisation and cloud e-mail sending."]];
+const ADMIN_VIEWS = { admin_dashboard: adminDashboard, admin_tasks: adminTasks, admin_templates: adminTemplates, admin_people: adminPeople,
+                      admin_settings: adminSettings, admin_runs: adminRuns };

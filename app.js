@@ -7,8 +7,9 @@
 const PROJECT = "https://tffiatipkehzizaciigv.supabase.co";
 const KEY = "sb_publishable_edgku1tj5w_zvD1ZPby5lg_SIg-mE4J";   // public key (identifies the project only)
 const AUTH = `${PROJECT}/auth/v1`, REST = `${PROJECT}/rest/v1`, FN = `${PROJECT}/functions/v1`;
-const app = document.getElementById("app"), who = document.getElementById("who");
+const app = document.getElementById("app");
 let session = null, me = null, tab = "tasks";
+const mainArea = () => document.getElementById("main") || app;     // page content (inside the shell)
 
 // ------------------------------------------------------------------ tiny DOM helpers
 function h(tag, attrs = {}, ...kids) {
@@ -22,10 +23,24 @@ function h(tag, attrs = {}, ...kids) {
   return el;
 }
 const fmt = (t) => (t ? new Date(t).toLocaleString("en-GB", { timeZone: "Asia/Karachi", dateStyle: "medium", timeStyle: "short" }) : "—");
+// Same badge colours as the local BAH portal (core.js BADGES).
+const BADGES = { active: "ok", succeeded: "ok", passed: "ok", online: "ok", paused: "warn", waiting_retry: "warn",
+  passed_with_warnings: "warn", pending: "info", claimed: "info", failed: "bad", inactive: "", revoked: "bad",
+  cancelled: "", offline: "", queued: "info", sending: "info", sent: "ok", invalid: "bad", lease_expired: "bad",
+  delivered: "ok", delivered_to_junk: "warn", bounced: "bad", not_confirmed: "warn", available: "ok",
+  authorised: "ok", enabled: "ok", "not authorised": "", "not enabled": "", "accepted by mail server": "ok" };
 function badge(s) {
-  const cls = /succeeded|passed|sent|delivered|active|available/.test(s || "") ? "ok"
-            : /failed|cancelled|bounced|invalid|lease_expired/.test(s || "") ? "bad" : "warn";
-  return h("span", { class: `badge ${cls}`, text: s || "—" });
+  const cls = BADGES[s] ?? (/online|on PC/.test(s || "") ? "ok" : /no password|offline/.test(s || "") ? "warn" : "");
+  return h("span", { class: `badge ${cls}`, text: String(s || "—").replaceAll("_", " ") });
+}
+function pageHead(title, sub, ...actions) {
+  return h("div", { class: "page-head" }, h("h1", { text: title }), h("div", { class: "actions" }, actions),
+    sub ? h("div", { class: "sub", text: sub }) : null);
+}
+const BRAND = (small) => h("div", { class: "brand" }, h("img", { src: "logo.svg", alt: "" }),
+  h("div", {}, "PE Business Automation Hub", h("small", { text: small })));
+function authPanel(title, form, ...extra) {
+  app.replaceChildren(h("div", { class: "auth" }, h("div", { class: "panel" }, BRAND("Cloud portal"), h("h1", { text: title }), form, ...extra)));
 }
 
 // ------------------------------------------------------------------ session (tab-scoped storage)
@@ -58,31 +73,30 @@ async function api(path, opts = {}) {
   if (!r.ok) throw new Error((j && j.message) || `Request failed (${r.status})`);
   return j;
 }
-function signOutLocal() { saveSession(null); me = null; who.hidden = true; renderLogin(); }
+function signOutLocal() { saveSession(null); me = null; renderLogin(); }
 
 // ------------------------------------------------------------------ screens
 function renderLogin(message) {
-  who.hidden = true;
   const email = h("input", { type: "email", autocomplete: "username", required: true });
   const pw = h("input", { type: "password", autocomplete: "current-password", required: true });
-  const err = h("div", { class: "err", text: message || "" });
-  const btn = h("button", { text: "Sign in" });
-  const form = h("form", { class: "card login", onsubmit: async (e) => {
+  const err = h("div", { class: "error", text: message || "" });
+  const btn = h("button", { class: "primary", text: "Sign in" });
+  const form = h("form", { onsubmit: async (e) => {
     e.preventDefault(); btn.disabled = true; err.textContent = "";
     try { saveSession(await authPost("/token?grant_type=password", { email: email.value.trim().toLowerCase(), password: pw.value }));
           pw.value = ""; await start(); }
     catch (x) { err.textContent = x.message.includes("not active") ? x.message : "E-mail or password incorrect, or account not active."; }
     finally { btn.disabled = false; }
-  } }, h("h2", { text: "Sign in" }), h("label", { text: "Official e-mail" }), email, h("label", { text: "Password" }), pw,
-     h("p", {}, btn), err, h("p", { class: "muted", text: "Forgot your password? Ask the BAH administrator for a new one-time link." }));
-  app.replaceChildren(form); email.focus();
+  } }, h("label", { class: "field" }, "Official e-mail", email), h("label", { class: "field" }, "Password", pw),
+     btn, err, h("p", { class: "hint", text: "Forgot your password? Ask the BAH administrator for a new one-time link." }));
+  authPanel("Sign in", form); email.focus();
 }
 
 function renderSetPassword(accessToken) {
   const p1 = h("input", { type: "password", autocomplete: "new-password", minlength: "12", required: true });
   const p2 = h("input", { type: "password", autocomplete: "new-password", minlength: "12", required: true });
-  const err = h("div", { class: "err" });
-  const form = h("form", { class: "card login", onsubmit: async (e) => {
+  const err = h("div", { class: "error" });
+  const form = h("form", { onsubmit: async (e) => {
     e.preventDefault(); err.textContent = "";
     if (p1.value !== p2.value) { err.textContent = "Passwords differ."; return; }
     if (p1.value.length < 12 || !/[A-Za-z]/.test(p1.value) || !/[0-9]/.test(p1.value)) { err.textContent = "At least 12 characters with letters and digits."; return; }
@@ -92,9 +106,9 @@ function renderSetPassword(accessToken) {
     if (!r.ok) { err.textContent = "The link has expired or the password was refused. Ask the administrator for a new link."; return; }
     await fetch(`${AUTH}/logout`, { method: "POST", headers: { apikey: KEY, authorization: `Bearer ${accessToken}` } }).catch(() => {});
     renderLogin("Password set. Sign in with your official e-mail and the new password.");
-  } }, h("h2", { text: "Set your BAH password" }), h("label", { text: "New password (min. 12, letters and digits)" }), p1,
-     h("label", { text: "Repeat" }), p2, h("p", {}, h("button", { text: "Save password" })), err);
-  app.replaceChildren(form);
+  } }, h("label", { class: "field" }, "New password (min. 12, letters and digits)", p1),
+     h("label", { class: "field" }, "Repeat", p2), h("button", { class: "primary", text: "Save password" }), err);
+  authPanel("Set your BAH password", form);
 }
 
 async function start() {
@@ -102,40 +116,68 @@ async function start() {
   const prof = (await api(`/profiles?select=full_name,email,role&id=eq.${me.user_id}`))[0];
   if (!prof || me.status !== "active") { signOutLocal(); renderLogin("Account not active for BAH."); return; }
   me.full_name = prof.full_name;
-  who.replaceChildren(h("span", { text: `${prof.full_name} · ${me.is_admin ? "Administrator" : "Employee"}` }),
-    h("button", { text: "Sign out", onclick: async () => {
-      try { await fetch(`${AUTH}/logout?scope=local`, { method: "POST", headers: { apikey: KEY, authorization: `Bearer ${session.access_token}` } }); } catch { /* ignore */ }
-      signOutLocal(); } }));
-  who.hidden = false;
+  if (me.is_admin && tab === "tasks") tab = "admin_dashboard";
   render();
 }
 
-const TABS = [["tasks", "My tasks"], ["runs", "Task status"], ["reports", "Reports"], ["notifications", "Notifications"]];
+// Navigation: same sections, labels and layout as the local BAH portal (static/js/admin.js / employee.js nav).
+// [key, label, subtitle] - a string entry is a section heading.
+const TABS = ["My work", ["tasks", "My Tasks", "Your report tasks, schedules and next runs."],
+  ["runs", "Execution History", "Every run of your tasks."], ["reports", "Reports", "Validated workbooks available to download."],
+  ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH for your tasks."]];
+
+function layout(nav) {
+  const signOut = async () => {
+    try { await fetch(`${AUTH}/logout?scope=local`, { method: "POST", headers: { apikey: KEY, authorization: `Bearer ${session.access_token}` } }); } catch { /* ignore */ }
+    signOutLocal();
+  };
+  return h("div", { class: "shell" },
+    h("header", { class: "topbar" }, BRAND(me.is_admin ? "Administration" : "Employee portal"),
+      h("div", { class: "spacer" }), h("span", { class: "cloudflag", text: "CLOUD" }),
+      h("div", { class: "userbox" }, h("span", { text: me.full_name }), h("span", { class: "role", text: me.is_admin ? "admin" : "employee" }),
+        h("button", { class: "small", text: "Sign out", onclick: signOut }))),
+    h("nav", { class: "sidebar" }, nav.map((n) => typeof n === "string" ? h("div", { class: "section", text: n })
+      : h("a", { class: n[0] === tab ? "active" : "", text: n[1], href: "#", onclick: (e) => { e.preventDefault(); tab = n[0]; render(); } }))),
+    h("main", { id: "main" }));
+}
+
+// A view returns either a list of nodes, or { actions: [buttons for the page header], content: [nodes] }.
 async function render() {
-  const tabs = me.is_admin && typeof ADMIN_TABS !== "undefined" ? ADMIN_TABS : TABS;
-  if (!tabs.some(([k]) => k === tab)) tab = tabs[0][0];
-  const nav = h("nav", { class: "tabs" }, tabs.map(([k, label]) =>
-    h("button", { class: k === tab ? "active" : "", text: label, onclick: () => { tab = k; render(); } })));
-  const body = h("div", { class: "card" }, h("p", { class: "muted", text: "Loading…" }));
-  app.replaceChildren(nav, body);
+  const nav = me.is_admin && typeof ADMIN_TABS !== "undefined" ? ADMIN_TABS : TABS;
+  const items = nav.filter((n) => typeof n !== "string");
+  if (!items.some(([k]) => k === tab)) tab = items[0][0];
+  const [, title, sub] = items.find(([k]) => k === tab);
+  app.replaceChildren(layout(nav));
+  const body = h("div", {}, pageHead(title, sub), h("div", { class: "empty", text: "Loading…" }));
+  mainArea().append(body);
   const view = VIEWS[tab] || (me.is_admin && ADMIN_VIEWS[tab]);
-  try { body.replaceChildren(...(await view())); }
-  catch (x) { body.replaceChildren(h("p", { class: "err", text: x.message })); }
+  try {
+    const out = await view();
+    const paged = !Array.isArray(out);
+    body.replaceChildren(pageHead(title, sub, ...(paged ? out.actions || [] : [])), ...(paged ? out.content : out));
+  } catch (x) { body.replaceChildren(pageHead(title, sub), h("div", { class: "notice warn", text: x.message })); }
 }
 
 function table(cols, rows, empty) {
-  if (!rows.length) return [h("p", { class: "muted", text: empty })];
-  return [h("table", {}, h("thead", {}, h("tr", {}, cols.map(([l]) => h("th", { text: l })))),
-            h("tbody", {}, rows.map((r) => h("tr", {}, cols.map(([, f]) => h("td", {}, f(r)))))))];
+  if (!rows.length) return [h("div", { class: "tablewrap" }, h("div", { class: "empty", text: empty }))];
+  return [h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, cols.map(([l]) => h("th", { text: l })))),
+            h("tbody", {}, rows.map((r) => h("tr", {}, cols.map(([, f]) => h("td", {}, f(r) ?? "—")))))))];
 }
-const schedText = (s) => !s ? "manual only" : s.frequency === "weekly" ? `weekly, day ${s.weekday}, ${s.run_time.slice(0, 5)}`
-  : s.frequency === "monthly" ? `monthly, ${s.last_day_of_month ? "last day" : "day " + s.month_day}, ${s.run_time.slice(0, 5)}`
-  : `${s.frequency}, ${s.run_time.slice(0, 5)}`;
+// Same wording as the local BAH (catalog.schedule_summary).
+const WEEKDAYS = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const schedText = (s) => {
+  if (!s || s.status === "inactive") return "No schedule (manual only)";
+  const when = { daily: "Daily", weekly: `Weekly on ${WEEKDAYS[s.weekday || 0]}`, fortnightly: `Every 14 days from ${s.anchor_date}`,
+                 monthly: s.last_day_of_month ? "Monthly on the last day" : `Monthly on day ${s.month_day}` }[s.frequency] || s.frequency;
+  return `${when} at ${s.run_time.slice(0, 5)} Asia/Karachi${s.status === "paused" ? " (paused)" : ""}`;
+};
+// Same type badges as the local BAH. Live SAP tasks are executed by the LOCAL BAH on their schedule; the cloud never runs them.
+const TARGETS = { synthetic: ["Synthetic", "info"], fixture: ["Fixture", "warn"], live_sap: ["LIVE SAP", "bad"] };
+const targetBadge = (t) => h("span", { class: `badge ${(TARGETS[t] || ["", ""])[1]}`, text: (TARGETS[t] || [t])[0] });
 
 // Next scheduled run (same rules as the database scheduler, Asia/Karachi = UTC+5, no DST). Live SAP is never scheduled.
 function nextRun(t) {
   const s = (t.schedules || [])[0];
-  if (t.execution_target === "live_sap") return "Manual Run Now only (live SAP)";
   if (!s || s.status !== "active" || t.status !== "active" || t.execution_mode === "manual_only") return "Not scheduled";
   const [hh, mm] = s.run_time.split(":").map(Number);
   const now = Date.now(), dayMs = 86400000;
@@ -148,7 +190,7 @@ function nextRun(t) {
       || (s.frequency === "fortnightly" && s.anchor_date && d >= Date.parse(s.anchor_date) && Math.round((d - Date.parse(s.anchor_date)) / dayMs) % 14 === 0)
       || (s.frequency === "monthly" && (s.last_day_of_month ? day.getUTCDate() === last : day.getUTCDate() === Math.min(s.month_day, last)));
     const at = d + (hh * 60 + mm) * 60000 - 5 * 3600000;        // Karachi time -> UTC
-    if (ok && at > now) return fmt(new Date(at).toISOString());
+    if (ok && at > now) return fmt(new Date(at).toISOString()) + (t.execution_target === "live_sap" ? " (local BAH)" : "");
   }
   return "—";
 }
@@ -156,10 +198,13 @@ function nextRun(t) {
 async function taskDetail(t) {
   const runs = await api(`/occurrences?select=id,kind,status,due_at,attempts,max_attempts,completed_at,executions(attempt_no,status,started_at,finished_at,row_count,column_count,validation_status,error_class,error_detail,engine),report_files(id,file_name,status)&task_id=eq.${t.id}&order=due_at.desc&limit=50`);
   const back = h("button", { class: "secondary", text: "Back", onclick: () => render() });
-  const body = h("div", { class: "card" },
-    h("h2", { text: t.name }), t.description ? h("p", { class: "muted", text: t.description }) : null,
-    h("p", {}, "Status ", badge(t.status), ` · ${t.execution_mode.replaceAll("_", " ")} · schedule: ${schedText((t.schedules || [])[0])} · next run: ${nextRun(t)}`),
-    h("h3", { text: "Execution history" }),
+  const body = h("div", {}, pageHead(t.name, t.description || "", back),
+    h("div", { class: "card" }, h("dl", { class: "dl" },
+      h("dt", { text: "Status" }), h("dd", {}, badge(t.status)), h("dt", { text: "Type" }), h("dd", {}, targetBadge(t.execution_target)),
+      h("dt", { text: "Execution mode" }), h("dd", { text: t.execution_mode.replaceAll("_", " ") }),
+      h("dt", { text: "Schedule" }), h("dd", { text: schedText((t.schedules || [])[0]) }),
+      h("dt", { text: "Next run" }), h("dd", { text: nextRun(t) }))),
+    h("div", { class: "card" }, h("h2", { text: "Execution history" }),
     ...table([["Due", (o) => fmt(o.due_at)], ["Type", (o) => o.kind], ["Status", (o) => badge(o.status)],
               ["Attempts", (o) => (o.executions || []).sort((a, b) => a.attempt_no - b.attempt_no).map((e) =>
                  h("div", {}, `#${e.attempt_no} `, badge(e.status), ` ${fmt(e.started_at)} → ${fmt(e.finished_at)}`,
@@ -167,9 +212,8 @@ async function taskDetail(t) {
                    e.error_class ? h("div", { class: "muted", text: `${e.error_class}${e.error_detail ? " - " + e.error_detail : ""}` }) : null))],
               ["Report", (o) => (o.report_files || []).filter((f) => f.status === "available").map((f) =>
                  h("button", { class: "secondary", text: "Download", onclick: (e) => download(f.id, e.target) }))]],
-             runs, "No runs yet."),
-    h("p", {}, back));
-  app.replaceChildren(body);
+             runs, "No runs yet.")));
+  mainArea().replaceChildren(body);
 }
 
 const VIEWS = {
@@ -178,7 +222,7 @@ const VIEWS = {
     return table([["Task", (t) => h("div", {}, h("strong", { text: t.name }), t.description ? h("div", { class: "muted", text: t.description }) : null)],
                   ["Schedule", (t) => schedText((t.schedules || [])[0])],
                   ["Next run", (t) => nextRun(t)],
-                  ["Runs on", (t) => t.execution_target === "live_sap" ? "SAP (attended runner)" : t.execution_target],
+                  ["Type", (t) => targetBadge(t.execution_target)],
                   ["Status", (t) => badge(t.status)],
                   ["", (t) => h("button", { class: "secondary", text: "Details", onclick: () => taskDetail(t) })]],
                  rows, "No tasks are assigned to you yet.");
