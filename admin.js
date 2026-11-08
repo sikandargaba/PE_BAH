@@ -349,13 +349,96 @@ function editTemplate(t) {
     h("p", { class: "hint", text: "Editing a template does not change existing tasks: each task keeps the parameters it was saved with." })), err));
 }
 
+// ------------------------------------------------------------------ runner releases (admin only)
+const SHA_RE = /^[0-9a-f]{64}$/;
+async function sha256Hex(buf) {
+  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", buf))).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function adminReleases() {
+  const [rels, runners, people] = await Promise.all([
+    api("/runner_releases?select=*&order=created_at.desc"),
+    api("/runners?select=id,employee_id,name,version,last_seen_at,status&status=eq.active"),
+    api("/profiles?select=id,full_name,email")]);
+  const stable = rels.filter((r) => r.status === "stable").sort((a, b) => vcmp(b.version, a.version))[0] || null;
+  const who = (id) => (people.find((p) => p.id === id) || {}).full_name || "?";
+  const setStatus = async (r, status) => {
+    let sha = null;
+    if (status === "testing" || status === "stable") {
+      sha = (prompt(`Mark ${r.version} as ${status.toUpperCase()}.\n\nPaste the SHA-256 printed by the build script for BAH-Runner-${r.version}.zip:`) || "").trim().toLowerCase();
+      if (!sha) return;
+    } else if (!confirm(status === "retired" ? `Retire ${r.version}? It can no longer be downloaded by employees (this is final).`
+                                             : `Move ${r.version} back to ${status}?`)) return;
+    try { await api("/rpc/admin_set_release_status", { method: "POST", body: JSON.stringify({ p_release: r.id, p_status: status, p_expected_sha256: sha }) }); render(); }
+    catch (x) { alert(x.message); }
+  };
+  const actions = (r) => h("div", { class: "actions" },
+    h("button", { class: "small", text: "Download", onclick: (e) => releaseDownload(r.object_path, e.target) }),
+    r.status === "draft" ? h("button", { class: "small", text: "Mark Testing", onclick: () => setStatus(r, "testing") }) : null,
+    r.status === "testing" ? h("button", { class: "small", text: "Mark Stable", onclick: () => setStatus(r, "stable") }) : null,
+    r.status === "testing" ? h("button", { class: "small", text: "Back to Draft", onclick: () => setStatus(r, "draft") }) : null,
+    r.status !== "retired" ? h("button", { class: "small danger", text: "Retire", onclick: () => setStatus(r, "retired") }) : null);
+  const relBadge = (s) => h("span", { class: `badge ${{ stable: "ok", testing: "info", draft: "warn", retired: "" }[s] || ""}`, text: s });
+  return { actions: [h("button", { class: "primary", text: "Upload new release", onclick: () => uploadRelease() })], content: [
+    h("div", { class: "notice", text: stable ? `Employees are offered ${stable.version} (latest Stable). Only Stable releases can be downloaded by employees.`
+                                             : "No Stable release yet - employees cannot download the runner." }),
+    h("div", { class: "card" }, h("h2", { text: "Releases" }),
+      ...table([["Version", (r) => h("strong", { text: r.version })], ["Status", (r) => relBadge(r.status)],
+                ["Release date", (r) => r.release_date], ["Size", (r) => `${Math.max(1, Math.round(r.size_bytes / 1024))} KB`],
+                ["SHA-256", (r) => h("span", { class: "mono", title: r.sha256, text: r.sha256.slice(0, 16) + "…" })],
+                ["Checksum confirmed", (r) => r.checksum_verified_at ? fmt(r.checksum_verified_at) : "—"],
+                ["Min. supported", (r) => r.min_supported_version || "—"],
+                ["Notes", (r) => h("div", { class: "muted prewrap notes-cell", text: r.notes || "—" })],
+                ["", actions]], rels, "No releases uploaded yet.")),
+    h("div", { class: "card" }, h("h2", { text: "Installed runner versions" }),
+      ...table([["Employee", (r) => who(r.employee_id)], ["Runner", (r) => r.name],
+                ["Version", (r) => String(r.version || "—").replace(/^cloud-/, "")],
+                ["Status", (r) => { const [t, c] = runnerState(r.version, stable); return h("span", { class: `badge ${c}`, text: t }); }],
+                ["Last seen", (r) => fmt(r.last_seen_at)]], runners, "No active runners."))] };
+}
+
+function uploadRelease() {
+  const f = { version: inp("", { placeholder: "1.0.1", required: true, pattern: "\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}" }),
+    date: inp(new Date().toISOString().slice(0, 10), { type: "date", required: true }),
+    min: inp("", { placeholder: "optional, e.g. 1.0.0" }), notes: h("textarea", { rows: "6", maxlength: "4000" }),
+    file: h("input", { type: "file", accept: ".zip", required: true }) };
+  const err = h("div", { class: "err" }), info = h("div", { class: "hint" });
+  const save = h("button", { class: "primary", text: "Upload as Draft" });
+  mainArea().replaceChildren(h("form", { onsubmit: async (e) => {
+    e.preventDefault(); err.textContent = ""; save.disabled = true;
+    try {
+      const version = f.version.value.trim(), file = f.file.files[0];
+      if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(version)) throw new Error("Version must be MAJOR.MINOR.PATCH, e.g. 1.0.1");
+      if (f.min.value.trim() && !/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(f.min.value.trim())) throw new Error("Minimum supported version must be MAJOR.MINOR.PATCH");
+      if (!file || file.name !== `BAH-Runner-${version}.zip`) throw new Error(`Choose the package file BAH-Runner-${version}.zip built by the build script.`);
+      if (file.size > 52428800) throw new Error("Package larger than 50 MB.");
+      const buf = await file.arrayBuffer(), sha = await sha256Hex(buf);
+      info.textContent = `SHA-256 of the selected file: ${sha}`;
+      const path = `releases/${version}/${file.name}`;
+      const up = await fetch(`${PROJECT}/storage/v1/object/${RELEASE_BUCKET}/${path}`, { method: "POST", body: buf,
+        headers: { apikey: KEY, authorization: `Bearer ${await token()}`, "content-type": "application/zip", "x-upsert": "false" } });
+      if (!up.ok) throw new Error(`Upload refused (${up.status}) - a package for this version may already exist.`);
+      await api("/runner_releases", { method: "POST", body: JSON.stringify({ version, file_name: file.name, object_path: path,
+        size_bytes: file.size, sha256: sha, release_date: f.date.value, notes: f.notes.value.trim(),
+        min_supported_version: f.min.value.trim() || null, created_by: me.user_id }) });
+      tab = "admin_releases"; render();
+    } catch (x) { err.textContent = x.message; } finally { save.disabled = false; }
+  } }, pageHead("Upload a new runner release", "The generic package (one for all employees). It starts as Draft; confirm its checksum to move it to Testing and Stable.",
+       save, h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() })),
+    h("div", { class: "card" }, h("div", { class: "grid" }, field("Version", f.version, "Must match bah_runner/VERSION in the package"),
+      field("Release date", f.date), field("Minimum supported version", f.min, "Older runners are told to update now"),
+      field("Package file", f.file, "dist\\BAH-Runner-<version>.zip from Build-RunnerPackage.ps1")),
+      field("What's new / release notes", f.notes), info), err));
+}
+
 // Same sections and labels as the local BAH admin navigation.
 const ADMIN_TABS = ["Overview", ["admin_dashboard", "Dashboard", "Operational overview - cloud BAH."],
   "Automation", ["admin_templates", "Report Templates", "Reusable report definitions. Editing creates a new version; existing tasks keep their copy."],
   ["admin_tasks", "Tasks", "Report tasks, schedules and employee assignments."],
   "People & execution", ["admin_people", "Employees", "Accounts, SAP user IDs and each employee's runner."],
+  ["runner", "BAH Runner", "Download, install and update the BAH Runner on your PC."],
   "Monitoring", ["admin_runs", "Execution History", "Every run, including report runs handed over by the local BAH."],
   ["reports", "Reports", "Validated workbooks stored in the cloud."], ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH."],
-  "System", ["admin_settings", "Settings", "Live SAP authorisation and cloud e-mail sending."]];
+  "System", ["admin_releases", "Runner Releases", "Generic BAH Runner packages: upload, verify, release, retire; installed versions."],
+  ["admin_settings", "Settings", "Live SAP authorisation and cloud e-mail sending."]];
 const ADMIN_VIEWS = { admin_dashboard: adminDashboard, admin_tasks: adminTasks, admin_templates: adminTemplates, admin_people: adminPeople,
-                      admin_settings: adminSettings, admin_runs: adminRuns };
+                      admin_settings: adminSettings, admin_runs: adminRuns, admin_releases: adminReleases };

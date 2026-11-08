@@ -124,7 +124,8 @@ async function start() {
 // [key, label, subtitle] - a string entry is a section heading.
 const TABS = ["My work", ["tasks", "My Tasks", "Your report tasks, schedules and next runs."],
   ["runs", "Execution History", "Every run of your tasks."], ["reports", "Reports", "Validated workbooks available to download."],
-  ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH for your tasks."]];
+  ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH for your tasks."],
+  "Account", ["runner", "BAH Runner", "Download, install and update the BAH Runner on your PC."]];
 
 function layout(nav) {
   const signOut = async () => {
@@ -217,6 +218,7 @@ async function taskDetail(t) {
 }
 
 const VIEWS = {
+  runner: runnerPage,
   async tasks() {
     const rows = await api("/tasks?select=id,name,description,execution_target,execution_mode,status,schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status)&order=name");
     return table([["Task", (t) => h("div", {}, h("strong", { text: t.name }), t.description ? h("div", { class: "muted", text: t.description }) : null)],
@@ -257,6 +259,66 @@ const VIEWS = {
                   ["Mailbox", (n) => n.delivery_status ? badge(n.delivery_status) : "not checked"]], rows, "No notifications yet.");
   },
 };
+
+// ------------------------------------------------------------------ BAH Runner (generic package, versions)
+const RELEASE_BUCKET = "bah-runner-releases";
+const vkey = (v) => { const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(v || "").replace(/^cloud-/, ""));
+                      return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0]; };
+const vcmp = (a, b) => { const x = vkey(a), y = vkey(b); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i]; return 0; };
+function runnerState(installed, latest) {
+  if (!installed) return ["not installed", ""];
+  if (!latest) return ["no release published", ""];
+  if (latest.min_supported_version && vcmp(installed, latest.min_supported_version) < 0) return ["unsupported - update now", "bad"];
+  return vcmp(installed, latest.version) < 0 ? [`update available (${latest.version})`, "warn"] : ["up to date", "ok"];
+}
+// Short-lived download link signed by Storage for THIS session (the bucket policy allows stable packages only).
+async function releaseDownload(path, btn) {
+  btn.disabled = true;
+  try {
+    const r = await fetch(`${PROJECT}/storage/v1/object/sign/${RELEASE_BUCKET}/${path}`, { method: "POST",
+      headers: { apikey: KEY, authorization: `Bearer ${await token()}`, "content-type": "application/json" },
+      body: JSON.stringify({ expiresIn: 300 }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.signedURL) throw new Error("This package is not available for download.");
+    window.location.assign(`${PROJECT}/storage/v1${j.signedURL}`);
+  } catch (x) { alert(x.message); } finally { btn.disabled = false; }
+}
+const REQUIREMENTS = ["Windows 10 or 11 (64-bit), your normal Windows user (no administrator rights needed)",
+  "Internet access to the BAH cloud; office network or Kerio VPN to reach SAP", "About 1 GB free disk space (Python, browser, reports)",
+  "Your BAH portal account, and your SAP user ID registered by the BAH administrator"];
+const INSTALL = ["Download the package below and unzip it (e.g. into Downloads).", "Double-click Install-BAH-Runner.cmd - it installs everything for your Windows user.",
+  "First installation only: BAH Runner Setup opens - sign in with your BAH account, confirm your SAP user ID and type your SAP password (stored only in Windows Credential Manager on your PC).",
+  "Start menu > PharmEvo BAH > Start BAH Runner. Keep the window open while you work.",
+  "Updates: use Update BAH Runner (or install the new package the same way) - your registration and SAP password are kept."];
+
+async function runnerPage() {
+  const [latestRows, mine] = await Promise.all([api("/rpc/release_latest_stable", { method: "POST", body: "{}" }),
+    api(`/runners?select=name,version,last_seen_at,status&status=eq.active&employee_id=eq.${me.user_id}`)]);
+  const latest = (latestRows || [])[0] || null, r = mine[0] || null;
+  const [state, cls] = runnerState(r && r.version, latest);
+  const dl = latest ? h("button", { class: "primary", text: `Download BAH Runner ${latest.version}`, onclick: (e) => releaseDownload(latest.object_path, e.target) }) : null;
+  return { actions: dl ? [dl] : [], content: [
+    h("div", { class: "grid2" },
+      h("div", { class: "card" }, h("h2", { text: "Latest version" }), latest
+        ? h("dl", { class: "dl" }, h("dt", { text: "Version" }), h("dd", { text: latest.version }),
+            h("dt", { text: "Release date" }), h("dd", { text: latest.release_date }),
+            h("dt", { text: "Package" }), h("dd", { text: `${latest.file_name} (${Math.max(1, Math.round(latest.size_bytes / 1024))} KB)` }),
+            h("dt", { text: "SHA-256" }), h("dd", { class: "mono", text: latest.sha256 }),
+            latest.min_supported_version ? h("dt", { text: "Minimum supported" }) : null,
+            latest.min_supported_version ? h("dd", { text: latest.min_supported_version }) : null)
+        : h("div", { class: "empty", text: "No BAH Runner release is published yet." })),
+      h("div", { class: "card" }, h("h2", { text: "Your PC" }), r
+        ? h("dl", { class: "dl" }, h("dt", { text: "Runner" }), h("dd", { text: r.name }),
+            h("dt", { text: "Installed version" }), h("dd", { text: String(r.version || "—").replace(/^cloud-/, "") }),
+            h("dt", { text: "Update status" }), h("dd", {}, h("span", { class: `badge ${cls}`, text: state })),
+            h("dt", { text: "Last seen" }), h("dd", { text: fmt(r.last_seen_at) }))
+        : h("div", { class: "empty", text: "No BAH Runner is registered for you yet - install it with the steps below." }))),
+    latest ? h("div", { class: "card" }, h("h2", { text: "What's new" }), h("div", { class: "prewrap", text: latest.notes || "—" })) : null,
+    h("div", { class: "grid2" },
+      h("div", { class: "card" }, h("h2", { text: "Installation" }), h("ol", {}, INSTALL.map((t) => h("li", { text: t })))),
+      h("div", { class: "card" }, h("h2", { text: "System requirements" }), h("ul", {}, REQUIREMENTS.map((t) => h("li", { text: t })))))
+  ].filter(Boolean) };
+}
 
 async function download(id, btn) {
   btn.disabled = true;

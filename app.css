@@ -112,3 +112,5 @@ button.link { background: none; border: 0; color: var(--brand-2); padding: 0 4px
 label.inline { display: flex; align-items: center; gap: 6px; }
 label.field input:not([type=checkbox]), label.field select, label.field textarea { width: 100%; }
 .auth form input { width: 100%; }
+.prewrap { white-space: pre-wrap; } .notes-cell { max-width: 320px; }
+ol li, ul li { margin-bottom: 6px; }
