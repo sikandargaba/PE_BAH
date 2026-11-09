@@ -1,4 +1,4 @@
-// PE BAH - browser portal for employees and the administrator. No frameworks, no third-party code.
+// BAH – Business Automation Hub: one browser portal for employees and administrators (role decided by the database). No frameworks, no third-party code.
 // Talks directly to the Supabase project's Auth / REST / Edge Function APIs with the PUBLIC key; every row is filtered
 // by row-level security in the database (employees: own records only). No service-role key, no SAP passwords.
 // All page text is set with textContent (never innerHTML with data).
@@ -38,9 +38,11 @@ function pageHead(title, sub, ...actions) {
     sub ? h("div", { class: "sub", text: sub }) : null);
 }
 const BRAND = (small) => h("div", { class: "brand" }, h("img", { src: "logo.svg", alt: "" }),
-  h("div", {}, "PE Business Automation Hub", h("small", { text: small })));
+  h("div", {}, "BAH – Business Automation Hub", small ? h("small", { text: small }) : null));
+const ROLE_LABEL = () => (me && me.is_admin ? "Administrator" : "Employee");
+// One sign-in page for everyone: nothing about any person or role is shown before sign-in.
 function authPanel(title, form, ...extra) {
-  app.replaceChildren(h("div", { class: "auth" }, h("div", { class: "panel" }, BRAND("Cloud portal"), h("h1", { text: title }), form, ...extra)));
+  app.replaceChildren(h("div", { class: "auth" }, h("div", { class: "panel" }, BRAND(""), h("h1", { text: title }), form, ...extra)));
 }
 
 // ------------------------------------------------------------------ session (tab-scoped storage)
@@ -87,7 +89,7 @@ function renderLogin(message) {
           pw.value = ""; await start(); }
     catch (x) { err.textContent = x.message.includes("not active") ? x.message : "E-mail or password incorrect, or account not active."; }
     finally { btn.disabled = false; }
-  } }, h("label", { class: "field" }, "Official e-mail", email), h("label", { class: "field" }, "Password", pw),
+  } }, h("label", { class: "field" }, "E-mail", email), h("label", { class: "field" }, "Password", pw),
      btn, err, h("p", { class: "hint", text: "Forgot your password? Ask the BAH administrator for a new one-time link." }));
   authPanel("Sign in", form); email.focus();
 }
@@ -116,13 +118,14 @@ async function start() {
   const prof = (await api(`/profiles?select=full_name,email,role&id=eq.${me.user_id}`))[0];
   if (!prof || me.status !== "active") { signOutLocal(); renderLogin("Account not active for BAH."); return; }
   me.full_name = prof.full_name;
-  if (me.is_admin && tab === "tasks") tab = "admin_dashboard";
+  tab = me.is_admin ? "admin_dashboard" : "dashboard";        // land on the dashboard for the user's role
   render();
 }
 
 // Navigation: same sections, labels and layout as the local BAH portal (static/js/admin.js / employee.js nav).
 // [key, label, subtitle] - a string entry is a section heading.
-const TABS = ["My work", ["tasks", "My Tasks", "Your report tasks, schedules and next runs."],
+const TABS = ["My work", ["dashboard", "My Dashboard", "Your tasks, recent runs and report e-mails at a glance."],
+  ["tasks", "My Tasks", "Your report tasks, schedules and next runs."],
   ["runs", "Execution History", "Every run of your tasks."], ["reports", "Reports", "Validated workbooks available to download."],
   ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH for your tasks."],
   "Account", ["runner", "BAH Runner", "Download, install and update the BAH Runner on your PC."]];
@@ -133,9 +136,9 @@ function layout(nav) {
     signOutLocal();
   };
   return h("div", { class: "shell" },
-    h("header", { class: "topbar" }, BRAND(me.is_admin ? "Administration" : "Employee portal"),
+    h("header", { class: "topbar" }, BRAND(me.is_admin ? "Administrator dashboard" : "Employee dashboard"),
       h("div", { class: "spacer" }), h("span", { class: "cloudflag", text: "CLOUD" }),
-      h("div", { class: "userbox" }, h("span", { text: me.full_name }), h("span", { class: "role", text: me.is_admin ? "admin" : "employee" }),
+      h("div", { class: "userbox" }, h("span", { text: me.full_name }), h("span", { class: "role", text: ROLE_LABEL() }),
         h("button", { class: "small", text: "Sign out", onclick: signOut }))),
     h("nav", { class: "sidebar" }, nav.map((n) => typeof n === "string" ? h("div", { class: "section", text: n })
       : h("a", { class: n[0] === tab ? "active" : "", text: n[1], href: "#", onclick: (e) => { e.preventDefault(); tab = n[0]; render(); } }))),
@@ -217,7 +220,35 @@ async function taskDetail(t) {
   mainArea().replaceChildren(body);
 }
 
+// Employee dashboard (same card/KPI layout as the admin dashboard; RLS limits every query to the user's own rows).
+async function employeeDashboard() {
+  const since = new Date(Date.now() - 7 * 86400000).toISOString();
+  const [tasks, occ, mails, runners, latestRows] = await Promise.all([
+    api("/tasks?select=id,status"), api(`/occurrences?select=status,kind,due_at,tasks(name)&due_at=gte.${since}&order=due_at.desc&limit=200`),
+    api(`/notifications?select=status&created_at=gte.${since}`),
+    api(`/runners?select=name,version,last_seen_at&status=eq.active&employee_id=eq.${me.user_id}`),
+    api("/rpc/release_latest_stable", { method: "POST", body: "{}" }).catch(() => [])]);
+  const n = (rows, f) => rows.filter(f).length;
+  const kpi = (label, value, cls = "") => h("div", { class: `kpi ${cls}` }, h("div", { class: "label", text: label }), h("div", { class: "value", text: String(value) }));
+  const group = (title, ...k) => h("div", { class: "card" }, h("h2", { text: title }), h("div", { class: "kpis" }, ...k));
+  const r = runners[0] || null, [state, cls] = runnerState(r && r.version, (latestRows || [])[0] || null);
+  return [
+    h("div", { class: "grid2" },
+      group("My tasks", kpi("Assigned tasks", tasks.length), kpi("Active", n(tasks, (t) => t.status === "active"), "ok")),
+      group("My runner", kpi("Runner", r ? r.name : "not set up", r ? "ok" : "warn"), kpi("Version", r ? String(r.version || "—").replace(/^cloud-/, "") : "—", cls),
+        kpi("Status", r ? state : "see BAH Runner", cls))),
+    h("div", { class: "grid2" },
+      group("Runs - last 7 days", kpi("Success", n(occ, (o) => o.status === "succeeded"), "ok"), kpi("Failed", n(occ, (o) => o.status === "failed"), "bad"),
+        kpi("Queued", n(occ, (o) => ["pending", "waiting_retry", "claimed"].includes(o.status)), "warn")),
+      group("Report e-mails - last 7 days", kpi("Sent", n(mails, (m) => m.status === "sent"), "ok"),
+        kpi("Queued", n(mails, (m) => ["queued", "sending"].includes(m.status)), "warn"), kpi("Failed", n(mails, (m) => m.status === "failed"), "bad"))),
+    h("div", { class: "card" }, h("h2", { text: "Recent runs" }),
+      ...table([["Task", (o) => (o.tasks || {}).name || "—"], ["Type", (o) => o.kind === "relay" ? "local BAH run" : o.kind],
+                ["Due", (o) => fmt(o.due_at)], ["Status", (o) => badge(o.status)]], occ.slice(0, 10), "No runs in the last 7 days."))];
+}
+
 const VIEWS = {
+  dashboard: employeeDashboard,
   runner: runnerPage,
   async tasks() {
     const rows = await api("/tasks?select=id,name,description,execution_target,execution_mode,status,schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status)&order=name");
@@ -288,7 +319,7 @@ const REQUIREMENTS = ["Windows 10 or 11 (64-bit), your normal Windows user (no a
   "Your BAH portal account, and your SAP user ID registered by the BAH administrator"];
 const INSTALL = ["Download the package below and unzip it (e.g. into Downloads).", "Double-click Install-BAH-Runner.cmd - it installs everything for your Windows user.",
   "First installation only: BAH Runner Setup opens - sign in with your BAH account, confirm your SAP user ID and type your SAP password (stored only in Windows Credential Manager on your PC).",
-  "Start menu > PharmEvo BAH > Start BAH Runner. Keep the window open while you work.",
+  "Start the runner from the Start menu: Start BAH Runner. Keep the window open while you work.",
   "Updates: use Update BAH Runner (or install the new package the same way) - your registration and SAP password are kept."];
 
 async function runnerPage() {

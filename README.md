@@ -1,4 +1,4 @@
-# PE BAH – web portal (GitHub Pages)
+# BAH – Business Automation Hub: web portal (GitHub Pages)
 
 Static site (no build step): `index.html`, `admin.js`, `app.js`, `app.css`, `.nojekyll`.
 It contains only the **public** Supabase key; all access control is enforced by Supabase Auth and

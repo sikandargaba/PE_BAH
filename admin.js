@@ -1,4 +1,4 @@
-// PE BAH - administrator screens (loaded for everyone, shown only when the database says is_admin).
+// BAH - administrator screens (loaded for everyone, shown only when the database says is_admin).
 // Every write goes through the REST API with the admin's own session: row-level security and the bah.admin_*
 // functions decide (inactive or non-admin users are refused by the database, not by this page).
 "use strict";
