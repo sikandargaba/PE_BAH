@@ -114,3 +114,4 @@ label.field input:not([type=checkbox]), label.field select, label.field textarea
 .auth form input { width: 100%; }
 .prewrap { white-space: pre-wrap; } .notes-cell { max-width: 320px; }
 ol li, ul li { margin-bottom: 6px; }
+.ok-text { color: var(--ok); }

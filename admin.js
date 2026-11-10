@@ -233,6 +233,36 @@ async function adminRuns() {
                        catch (x) { alert(x.message); } } }) : ""]], rows, "No runs yet.");
 }
 
+// ------------------------------------------------------------------ portal invitation (separate from PC registration)
+// E-mails a fresh one-time password-setup link to the account's REGISTERED address (admin-setup-link, deliver=email).
+// The link itself never reaches this page. The button stays disabled while sending and for 2 minutes after a send;
+// the server refuses repeats within 2 minutes as well. Existing accounts only - nothing is created.
+const inviteCooldown = new Map();                       // user_id -> time the last invitation was sent
+function inviteControl(p) {
+  const status = h("div", { class: "hint" });
+  const cooling = () => Date.now() - (inviteCooldown.get(p.id) || 0) < 120000;
+  const btn = h("button", { class: "secondary small", text: "Invite / Resend setup link", disabled: p.status !== "active" || cooling(),
+    onclick: async () => {
+      if (!confirm(`Send a password-setup e-mail to ${p.full_name} (${p.email})?\n\nAny earlier setup link for this account stops working.`)) return;
+      btn.disabled = true; status.className = "hint"; status.textContent = "Sending…";
+      try {
+        const r = await fetch(`${FN}/admin-setup-link`, { method: "POST",
+          headers: { apikey: KEY, authorization: `Bearer ${await token()}`, "content-type": "application/json" },
+          body: JSON.stringify({ user_id: p.id, kind: "setup", deliver: "email" }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.message || `Request failed (${r.status})`);
+        inviteCooldown.set(p.id, Date.now());
+        status.className = "hint ok-text"; status.textContent = `Setup e-mail sent to ${j.email || p.email}.`;
+        setTimeout(() => { btn.disabled = cooling(); }, 120000);
+      } catch (x) {
+        status.className = "error"; status.textContent = `Not sent: ${x.message}`;
+        btn.disabled = false;
+      }
+    } });
+  if (cooling()) status.textContent = "Setup e-mail sent recently.";
+  return h("div", {}, btn, status);
+}
+
 // ------------------------------------------------------------------ people, SAP identities, runners
 async function adminPeople() {
   const [people, ids, runners, conn] = await Promise.all([
@@ -243,6 +273,7 @@ async function adminPeople() {
   const online = (r) => r.last_seen_at && Date.now() - new Date(r.last_seen_at).getTime() < 10 * 60000;
   return table([["Person", (p) => h("div", {}, h("strong", { text: p.full_name }), h("div", { class: "muted", text: `${p.email} · ${p.employee_code} · ${p.role}` }))],
                 ["Account", (p) => badge(p.status)],
+                ["Portal access", (p) => p.id === me.user_id ? h("span", { class: "muted", text: "you" }) : inviteControl(p)],
                 ["SAP user", (p) => { const i = ids.find((x) => x.employee_id === p.id);
                    return h("div", {}, i ? `${i.sap_user_id} ` : "—", i ? badge(i.credential_configured ? "password on PC" : "no password on PC") : null,
                      h("button", { class: "link", text: "change", onclick: async () => {
