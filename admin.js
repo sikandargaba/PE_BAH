@@ -83,6 +83,64 @@ async function adminTasks() {
              tasks, "No tasks yet - create the first one.") };
 }
 
+// ------------------------------------------------------------------ task create / edit (card layout)
+// Multi-address input with removable chips. Accepts Enter, the Add button, and pasted lists separated by
+// commas, semicolons, spaces or new lines. Values are stored as the same lower-case address arrays as before.
+function emailChips(initial, placeholder) {
+  const values = [];
+  const chips = h("div", { class: "chips" });
+  const msg = h("div", { class: "chip-msg" });
+  const input = h("input", { type: "email", placeholder, autocomplete: "off", "aria-label": placeholder });
+  const draw = () => chips.replaceChildren(...values.map((v) => h("span", { class: "chip" }, v,
+    h("button", { type: "button", class: "chip-x", "aria-label": `Remove ${v}`, text: "×", onclick: () => { values.splice(values.indexOf(v), 1); draw(); } }))));
+  const add = (text) => {
+    const parts = String(text || "").split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
+    const bad = [], dup = [];
+    for (const a of parts) {
+      if (!EMAIL_RE.test(a)) bad.push(a);
+      else if (values.includes(a)) dup.push(a);
+      else values.push(a);
+    }
+    draw();
+    msg.textContent = bad.length ? `Not a valid e-mail address: ${bad.join(", ")}` : dup.length ? `Already added: ${dup.join(", ")}` : "";
+    msg.className = bad.length ? "chip-msg error" : "chip-msg";
+    input.value = bad.join(", ");
+    return !bad.length;
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === "," || e.key === ";") { e.preventDefault(); add(input.value); } });
+  input.addEventListener("paste", (e) => { const t = (e.clipboardData || window.clipboardData).getData("text"); if (/[,;\s]/.test(t.trim())) { e.preventDefault(); add(t); } });
+  input.addEventListener("blur", () => { if (input.value.trim()) add(input.value); });
+  (initial || []).forEach((a) => add(a));                   // old records: arrays (or comma lists) stay editable
+  msg.textContent = "";
+  return { el: h("div", { class: "chip-input" }, h("div", { class: "chip-row" }, chips, input,
+                   h("button", { type: "button", class: "small secondary", text: "Add", onclick: () => add(input.value) })), msg),
+           values: () => { if (input.value.trim()) add(input.value); return values.slice(); }, pendingInvalid: () => !!input.value.trim() };
+}
+
+const PLACEHOLDERS = ["{report_name}", "{period_start}", "{period_end}", "{execution_date}", "{assigned_employee}", "{execution_status}"];
+function placeholderBar(target) {
+  return h("div", { class: "ph-bar" }, h("span", { class: "hint", text: "Insert:" }),
+    PLACEHOLDERS.map((ph) => h("button", { type: "button", class: "ph", text: ph, onclick: () => {
+      const a = target.selectionStart ?? target.value.length, b = target.selectionEnd ?? a;
+      target.value = target.value.slice(0, a) + ph + target.value.slice(b); target.focus(); target.selectionStart = target.selectionEnd = a + ph.length;
+    } })));
+}
+
+function previewEmail(o) {
+  const fill = (txt) => txt.replace(/\{([a-z_]+)\}/g, (m, k) => (k in o.values ? o.values[k] : m));
+  const close = () => overlay.remove();
+  const row = (k, v) => [h("dt", { text: k }), h("dd", { text: v || "—" })];
+  const overlay = h("div", { class: "overlay", onclick: (e) => { if (e.target === overlay) close(); } },
+    h("div", { class: "modal" }, h("header", {}, h("h3", { text: "E-mail preview (sample values)" }), h("button", { type: "button", class: "small secondary", text: "Close", onclick: close })),
+      h("div", { class: "body" },
+        h("dl", { class: "dl" }, row("To", o.to.join(", ")), row("CC", o.cc.join(", ")), row("BCC", o.bcc.join(", ")),
+          row("Subject", o.subject ? fill(o.subject) : "(standard subject: report name and period)"),
+          row("Content", { attachment: "Excel attachment", body: "Data table in the e-mail", both: "Data table and Excel attachment" }[o.format])),
+        h("div", { class: "preview-body", text: o.body ? fill(o.body) : "(standard report text is used when the body is left empty)" }),
+        h("p", { class: "hint", text: "Placeholders are filled with sample values here; the real e-mail uses the run's values." }))));
+  document.body.append(overlay);
+}
+
 async function editTask(id, people) {
   const conn = (await api("/app_connections?select=id,code,display_name&status=eq.active"))[0];
   if (!conn) { alert("No active SAP connection configured."); return; }
@@ -99,24 +157,29 @@ async function editTask(id, people) {
     sc = (await api(`/schedules?select=*&task_id=eq.${id}`))[0] || null;
     asg = await api(`/assignments?select=id,employee_id,status&task_id=eq.${id}`);
   }
+  const asList = (v) => (Array.isArray(v) ? v : String(v || "").split(/[,;]+/)).map((x) => String(x).trim()).filter(Boolean);
   const f = {
     name: inp(t.name, { maxlength: "120", required: true }), description: inp(t.description, { maxlength: "200" }),
     target: sel(t.execution_target, [["live_sap", "Live SAP (manual, attended)"], ["synthetic", "Synthetic (test)"], ["fixture", "Fixture (test)"]]),
     mode: sel(t.execution_mode, [["manual_only", "Manual Run Now only"], ["scheduled_and_manual", "Scheduled and manual"], ["scheduled_only", "Scheduled only"]]),
     status: sel(t.status, [["active", "Active"], ["paused", "Paused"], ["inactive", "Inactive"]]),
-    freq: sel(sc ? sc.frequency : "", [["", "No schedule"], ["daily", "Daily"], ["weekly", "Weekly"], ["fortnightly", "Fortnightly"], ["monthly", "Monthly"]]),
+    freq: sel(sc && sc.status !== "inactive" ? sc.frequency : "", [["", "No schedule (manual only)"], ["daily", "Daily"], ["weekly", "Weekly"], ["fortnightly", "Every 14 days"], ["monthly", "Monthly"]]),
     time: inp(sc ? sc.run_time.slice(0, 5) : "08:00", { type: "time" }),
     weekday: sel(sc && sc.weekday ? String(sc.weekday) : "1", [["1", "Monday"], ["2", "Tuesday"], ["3", "Wednesday"], ["4", "Thursday"], ["5", "Friday"], ["6", "Saturday"], ["7", "Sunday"]]),
     anchor: inp(sc ? sc.anchor_date : "", { type: "date" }), mday: inp(sc && sc.month_day ? sc.month_day : 1, { type: "number", min: "1", max: "31" }),
     lastday: chk(sc && sc.last_day_of_month),
-    eon: chk(em.enabled), eto: inp((em.to || []).join(", ")), ecc: inp((em.cc || []).join(", ")), ebcc: inp((em.bcc || []).join(", ")),
-    esub: inp(em.subject, { maxlength: "200" }), ebody: h("textarea", { rows: "4" }), fsub: inp(em.failure_subject, { maxlength: "200" }),
-    fbody: h("textarea", { rows: "3" }), nsucc: chk(em.notify_success), nfail: chk(em.notify_failure),
-    efmt: sel(em.delivery_format, [["attachment", "Excel attachment only"], ["body", "Data in e-mail body only"], ["both", "Both"]]),
+    eon: chk(em.enabled),
+    esub: inp(em.subject, { maxlength: "200", class: "wide", placeholder: "e.g. {report_name} - {execution_date}" }),
+    ebody: h("textarea", { class: "email-body", rows: "10", placeholder: "Leave empty to use the standard report text. Use the placeholders above to insert run details." }),
+    fsub: inp(em.failure_subject, { maxlength: "200", class: "wide", placeholder: "Leave empty for the standard failure subject" }),
+    fbody: h("textarea", { class: "email-body short", rows: "6", placeholder: "Leave empty for the standard failure text" }),
+    nsucc: chk(em.notify_success), nfail: chk(em.notify_failure),
+    efmt: sel(em.delivery_format, [["attachment", "Excel attachment only"], ["body", "Data table in the e-mail body only"], ["both", "Data table and Excel attachment"]]),
   };
   f.ebody.value = em.body || ""; f.fbody.value = em.failure_body || "";
+  const rTo = emailChips(asList(em.to), "name@company.com"), rCc = emailChips(asList(em.cc), "Add CC"), rBcc = emailChips(asList(em.bcc), "Add BCC");
 
-  // ---- single Report Template choice; the task keeps its own copy (version) of the template configuration
+  // ---- Report Template (the task keeps its own copy/version of the template configuration)
   const tplLabel = (x) => `${tplName(x)} (v${x.version})${x.status === "active" ? "" : " - inactive"}`;
   const choosable = templates.filter((x) => x.status === "active" || x.id === t.template_id);
   f.tpl = sel(t.template_id || "", [["", id && cfg ? "— keep the task's saved configuration (no template) —" : "— choose a report template —"],
@@ -124,12 +187,13 @@ async function editTask(id, people) {
   const current = templates.find((x) => x.id === t.template_id);
   const upgrade = chk(false);
   const summary = h("div", {});
-  let pending = null;                               // template chosen in this edit -> its config will be saved
+  let pending = null;
+  const currentConfig = () => (pending ? tplConfig(pending) : cfg);
   const show = () => {
     const tp = templates.find((x) => x.id === f.tpl.value);
     const fresh = tp && (tp.id !== t.template_id || upgrade.checked);
     pending = fresh ? tp : null;
-    const c = fresh ? tplConfig(tp) : cfg;
+    const c = currentConfig();
     summary.replaceChildren(c ? configSummary(c, fresh ? `from template "${tplName(tp)}" v${tp.version}` :
                               `saved with the task${t.template_version ? ` (template v${t.template_version})` : ""}`)
                               : h("div", { class: "hint", text: "Choose a report template to load the SAP report configuration." }));
@@ -141,21 +205,64 @@ async function editTask(id, people) {
   const upgradeRow = current && t.template_version && current.version > t.template_version
     ? field(`Update to the template's current version (v${current.version}); this task uses v${t.template_version}`, upgrade) : null;
 
+  // ---- dynamic schedule: only the fields the frequency needs
+  const sTime = field("Time (Asia/Karachi)", f.time), sWeek = field("Weekday", f.weekday), sAnchor = field("First run date", f.anchor, "Repeats every 14 days from this date"),
+        sMday = field("Day of month", f.mday), sLast = field("Last day of the month", f.lastday);
+  const schedHint = h("div", { class: "hint" });
+  const syncSched = () => {
+    const v = f.freq.value;
+    const vis = { time: !!v, week: v === "weekly", anchor: v === "fortnightly", mday: v === "monthly" && !f.lastday.checked, last: v === "monthly" };
+    sTime.hidden = !vis.time; sWeek.hidden = !vis.week; sAnchor.hidden = !vis.anchor; sMday.hidden = !vis.mday; sLast.hidden = !vis.last;
+    schedHint.textContent = !v ? "No automatic runs; use Run Now." : f.target.value === "live_sap"
+      ? "Live SAP schedules are executed by the local BAH; the cloud never runs live SAP on a schedule." : "";
+  };
+  for (const el of [f.freq, f.lastday, f.target]) el.addEventListener("change", syncSched);
+  syncSched();
+
+  // ---- employees
   const assignBoxes = people.filter((p) => p.status === "active").map((p) => {
     const a = asg.find((x) => x.employee_id === p.id);
     return { p, a, box: chk(a && a.status === "active") };
   });
+  const countBadge = h("span", { class: "badge info" });
+  const syncCount = () => { const n = assignBoxes.filter((x) => x.box.checked).length; countBadge.textContent = `${n} selected`; };
+  assignBoxes.forEach((x) => x.box.addEventListener("change", syncCount));
+  syncCount();
+
+  // ---- e-mail on/off makes the dependent sections visibly inactive
+  const emailBody = h("div", { class: "section-body" });
+  const notifyBody = h("div", { class: "section-body" });
+  const notifyHint = h("p", { class: "hint" });
+  const syncEmail = () => {
+    emailBody.classList.toggle("muted-section", !f.eon.checked);
+    notifyBody.classList.toggle("muted-section", !f.eon.checked);
+    notifyHint.textContent = f.eon.checked ? "E-mails go to the recipients above when a run finishes with the selected outcome."
+                                           : "E-mail is switched off for this task: no notification is sent whatever is ticked here.";
+  };
+  f.eon.addEventListener("change", syncEmail);
+
   const err = h("div", { class: "err" });
   const save = h("button", { class: "primary", text: id ? "Save changes" : "Create task" });
-  const form = h("form", { onsubmit: async (e) => {
+  const preview = h("button", { type: "button", class: "secondary", text: "Preview e-mail", onclick: () => {
+    const c = currentConfig() || {}, r = periodRange(c.date_rule, c.custom_from, c.custom_to);
+    const d = (x) => x ? `${String(x.getUTCDate()).padStart(2, "0")}.${String(x.getUTCMonth() + 1).padStart(2, "0")}.${x.getUTCFullYear()}` : "-";
+    const firstEmp = assignBoxes.find((x) => x.box.checked);
+    previewEmail({ to: rTo.values(), cc: rCc.values(), bcc: rBcc.values(), subject: f.esub.value.trim(), body: f.ebody.value, format: f.efmt.value,
+      values: { report_name: f.description.value.trim() || f.name.value.trim() || "Report", task_name: f.description.value.trim() || f.name.value.trim(),
+                period_start: d(r && r[0]), period_end: d(r && r[1]),
+                execution_date: new Date(Date.now() + 5 * 3600000).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }).replace(/ /g, "-"),
+                assigned_employee: firstEmp ? firstEmp.p.full_name : "Employee name", execution_status: "Succeeded", failure_reason: "-" } });
+  } });
+
+  const form = h("form", { class: "task-form", onsubmit: async (e) => {
     e.preventDefault(); err.textContent = ""; save.disabled = true;
     try {
-      const rcpt = { to: list(f.eto.value), cc: list(f.ecc.value), bcc: list(f.ebcc.value) };
-      const bad = [...rcpt.to, ...rcpt.cc, ...rcpt.bcc].filter((a) => !EMAIL_RE.test(a));
-      if (bad.length) throw new Error(`Invalid e-mail address: ${bad.join(", ")}`);
-      if (f.eon.checked && !rcpt.to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
-      const config = pending ? tplConfig(pending) : cfg;
+      const to = rTo.values(), cc = rCc.values(), bcc = rBcc.values();
+      if (rTo.pendingInvalid() || rCc.pendingInvalid() || rBcc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
+      if (f.eon.checked && !to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
+      const config = currentConfig();
       if (!config) throw new Error("Choose a report template.");
+      if (f.freq.value === "fortnightly" && !f.anchor.value) throw new Error("Every 14 days needs a first run date.");
       const keepTpl = !pending && f.tpl.value === (t.template_id || "");
       const row = { name: f.name.value.trim(), description: f.description.value.trim() || (pending ? tplName(pending) : null),
                     connection_id: conn.id, execution_target: f.target.value, execution_mode: f.mode.value, status: f.status.value,
@@ -164,7 +271,8 @@ async function editTask(id, people) {
       const saved = id ? (await api(`/tasks?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(row), headers: { prefer: "return=representation" } }))[0]
                        : (await api("/tasks", { method: "POST", body: JSON.stringify({ ...row, created_by: me.user_id }), headers: { prefer: "return=representation" } }))[0];
       const tid = saved.id;
-      const email = { enabled: f.eon.checked, ...rcpt, subject: f.esub.value.trim(), body: f.ebody.value, failure_subject: f.fsub.value.trim(),
+      // same e-mail record as before (arrays of addresses + the existing fields), so delivery is unchanged
+      const email = { ...em, enabled: f.eon.checked, to, cc, bcc, subject: f.esub.value.trim(), body: f.ebody.value, failure_subject: f.fsub.value.trim(),
                       failure_body: f.fbody.value, notify_success: f.nsucc.checked, notify_failure: f.nfail.checked,
                       delivery_format: f.efmt.value, format_version: 2 };
       await upsert("task_configs", { task_id: tid, config, email }, "task_id");
@@ -186,24 +294,39 @@ async function editTask(id, people) {
       tab = "admin_tasks"; render();
     } catch (x) { err.textContent = x.message; } finally { save.disabled = false; }
   } },
-    pageHead(id ? `Edit task: ${t.name}` : "New task", "", save, h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() })),
+    pageHead(id ? `Edit task: ${t.name}` : "New task", id ? "Report task, schedule, assignees and e-mail delivery." : "Create a report task from a report template."),
     id && t.execution_target === "live_sap" ? h("div", { class: "notice", text: SYNC_NOTE }) : null,
-    h("div", { class: "card" }, h("h2", { text: "Task" }),
-    h("div", { class: "grid" }, field("Report template", f.tpl, "Loads the template's SAP report configuration into this task. Later template edits do not change the task."),
-      field("Task name", f.name), field("Description (shown in lists and e-mails)", f.description),
-      field("Runs on", f.target, "Live SAP runs only by Run Now, attended, on the assigned employee's own runner."),
-      field("Execution mode", f.mode), field("Status", f.status), upgradeRow), summary),
-    h("div", { class: "card" }, h("h2", { text: "Schedule" }),
-    h("div", { class: "grid" }, field("Frequency", f.freq, "Live SAP schedules are executed by the local BAH; the cloud never runs live SAP on a schedule."),
-      field("Time (Asia/Karachi)", f.time), field("Weekday (weekly)", f.weekday), field("Anchor date (fortnightly)", f.anchor),
-      field("Day of month (monthly)", f.mday), field("Last day of month (monthly)", f.lastday))),
-    h("div", { class: "card" }, h("h2", { text: "Assigned employees" }),
-    h("div", { class: "grid" }, assignBoxes.map(({ p, box }) => h("label", { class: "field check" }, box, ` ${p.full_name} (${p.role})`)))),
-    h("div", { class: "card" }, h("h2", { text: "E-mail" }),
-    h("div", { class: "grid" }, field("Send e-mail", f.eon), field("Delivery format", f.efmt), field("To", f.eto), field("CC", f.ecc), field("BCC", f.ebcc),
-      field("Subject", f.esub, "Placeholders: {report_name} {period_start} {period_end} {execution_date} {assigned_employee} {execution_status}"),
-      field("Body (blank = standard text)", f.ebody), field("Notify on success", f.nsucc), field("Notify on failure", f.nfail),
-      field("Failure subject", f.fsub), field("Failure body", f.fbody))), err);
+    h("section", { class: "card form-card" }, h("h2", { text: "1. Task details" }),
+      h("div", { class: "grid-2" }, field("Task name", f.name), field("Description", f.description, "Shown in lists, history and e-mails ({report_name})."),
+        h("div", { class: "span-2" }, field("Report template", f.tpl, "Loads the template's SAP configuration into this task; later template edits do not change the task.")),
+        field("Execution mode", f.mode), field("Status", f.status),
+        field("Runs on", f.target, "Live SAP runs only by Run Now, attended, on the employee's own runner."), upgradeRow),
+      summary),
+    h("section", { class: "card form-card" }, h("h2", { text: "2. Schedule" }),
+      h("div", { class: "grid-3" }, field("Frequency", f.freq), sTime, sWeek, sAnchor, sMday, sLast), schedHint),
+    h("section", { class: "card form-card" }, h("div", { class: "card-head" }, h("h2", { text: "3. Assigned employees" }), countBadge),
+      assignBoxes.length ? h("div", { class: "check-grid" }, assignBoxes.map(({ p, box }) => h("label", { class: "check-card" }, box,
+        h("span", {}, h("strong", { text: p.full_name }), h("small", { text: p.role === "admin" ? "Administrator" : "Employee" })))))
+        : h("div", { class: "empty", text: "No active employees." })),
+    h("section", { class: "card form-card" }, h("div", { class: "card-head" }, h("h2", { text: "4. E-mail configuration" }),
+        h("label", { class: "toggle" }, f.eon, " Send report e-mail")),
+      emailBody),
+    h("section", { class: "card form-card" }, h("h2", { text: "5. Notification settings" }),
+      notifyBody),
+    err,
+    h("div", { class: "sticky-actions" }, h("span", { class: "hint", text: id ? "Changes apply to future runs." : "" }),
+      h("div", { class: "actions" }, h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() }), save)));
+  emailBody.append(
+    h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el), field("BCC", rBcc.el, "Press Enter or Add; paste several addresses separated by commas or semicolons.")),
+    h("div", { class: "grid-2" }, field("Delivery format", f.efmt), h("div", {})),
+    field("Subject", f.esub, "Leave empty for the standard subject (report name and period)."),
+    h("label", { class: "field" }, "Body", placeholderBar(f.ebody), f.ebody),
+    h("div", { class: "actions" }, preview),
+    h("details", { class: "subsection" }, h("summary", { text: "Failure e-mail (optional)" }),
+      field("Failure subject", f.fsub), h("label", { class: "field" }, "Failure body", placeholderBar(f.fbody), f.fbody)));
+  notifyBody.append(h("div", { class: "grid-2" }, field("Send the report e-mail when the run succeeds", f.nsucc),
+                                             field("Send a failure e-mail when the run fails", f.nfail)), notifyHint);
+  syncEmail();
   mainArea().replaceChildren(form);
 }
 
