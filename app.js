@@ -175,6 +175,36 @@ const schedText = (s) => {
                  monthly: s.last_day_of_month ? "Monthly on the last day" : `Monthly on day ${s.month_day}` }[s.frequency] || s.frequency;
   return `${when} at ${s.run_time.slice(0, 5)} Asia/Karachi${s.status === "paused" ? " (paused)" : ""}`;
 };
+// Report label everywhere (lists, history, reports, notifications): the task's Description, else its name.
+const repName = (t) => (t && (t.description || t.name)) || "—";
+// Reporting period for a date rule, resolved like the runner (bah_runner/dates.py resolve, Asia/Karachi date):
+// the dates shown here are the dates the runner enters in SAP for a run today.
+function periodRange(rule, customFrom, customTo, now = new Date()) {
+  const k = new Date(now.getTime() + 5 * 3600000);                       // Karachi wall clock (UTC+5, no DST)
+  const D = (y, m, d) => new Date(Date.UTC(y, m, d));
+  const today = D(k.getUTCFullYear(), k.getUTCMonth(), k.getUTCDate());
+  const add = (d, n) => new Date(d.getTime() + n * 86400000);
+  const monday = add(today, -((today.getUTCDay() + 6) % 7));
+  const y = today.getUTCFullYear(), m = today.getUTCMonth();
+  switch (rule) {
+    case "today": return [today, today];
+    case "previous_day": return [add(today, -1), add(today, -1)];
+    case "current_month": return [D(y, m, 1), today];
+    case "previous_month": return [D(y, m - 1, 1), D(y, m, 0)];
+    case "current_week": return [monday, today];
+    case "previous_week": return [add(monday, -7), add(monday, -1)];
+    case "rolling_7_days": return [add(today, -6), today];
+    case "rolling_30_days": return [add(today, -29), today];
+    case "rolling_90_days": return [add(today, -89), today];
+    case "custom": return customFrom && customTo ? [new Date(customFrom + "T00:00:00Z"), new Date(customTo + "T00:00:00Z")] : null;
+    default: return null;
+  }
+}
+function periodText(rule, customFrom, customTo, now) {
+  const r = periodRange(rule, customFrom, customTo, now);
+  const f = (d) => `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
+  return r ? `${f(r[0])} to ${f(r[1])}` : rule === "custom" ? "choose From and To" : "—";
+}
 // Same type badges as the local BAH. Live SAP tasks are executed by the LOCAL BAH on their schedule; the cloud never runs them.
 const TARGETS = { synthetic: ["Synthetic", "info"], fixture: ["Fixture", "warn"], live_sap: ["LIVE SAP", "bad"] };
 const targetBadge = (t) => h("span", { class: `badge ${(TARGETS[t] || ["", ""])[1]}`, text: (TARGETS[t] || [t])[0] });
@@ -224,7 +254,7 @@ async function taskDetail(t) {
 async function employeeDashboard() {
   const since = new Date(Date.now() - 7 * 86400000).toISOString();
   const [tasks, occ, mails, runners, latestRows] = await Promise.all([
-    api("/tasks?select=id,status"), api(`/occurrences?select=status,kind,due_at,tasks(name)&due_at=gte.${since}&order=due_at.desc&limit=200`),
+    api("/tasks?select=id,status"), api(`/occurrences?select=status,kind,due_at,tasks(name,description)&due_at=gte.${since}&order=due_at.desc&limit=200`),
     api(`/notifications?select=status&created_at=gte.${since}`),
     api(`/runners?select=name,version,last_seen_at&status=eq.active&employee_id=eq.${me.user_id}`),
     api("/rpc/release_latest_stable", { method: "POST", body: "{}" }).catch(() => [])]);
@@ -243,7 +273,7 @@ async function employeeDashboard() {
       group("Report e-mails - last 7 days", kpi("Sent", n(mails, (m) => m.status === "sent"), "ok"),
         kpi("Queued", n(mails, (m) => ["queued", "sending"].includes(m.status)), "warn"), kpi("Failed", n(mails, (m) => m.status === "failed"), "bad"))),
     h("div", { class: "card" }, h("h2", { text: "Recent runs" }),
-      ...table([["Task", (o) => (o.tasks || {}).name || "—"], ["Type", (o) => o.kind === "relay" ? "local BAH run" : o.kind],
+      ...table([["Task", (o) => repName(o.tasks)], ["Type", (o) => o.kind === "relay" ? "local BAH run" : o.kind],
                 ["Due", (o) => fmt(o.due_at)], ["Status", (o) => badge(o.status)]], occ.slice(0, 10), "No runs in the last 7 days."))];
 }
 
@@ -311,7 +341,7 @@ const VIEWS = {
     const runnerNote = !runner ? h("div", { class: "notice warn", text: "No BAH Runner is registered for you yet - see BAH Runner to install it. Run Now needs it." })
       : ctx.online ? h("div", { class: "notice", text: `Your BAH Runner ${runner.name} is online${runner.live_permitted ? " and allowed to run live SAP reports" : ""}.` })
       : h("div", { class: "notice warn", text: `Your BAH Runner ${runner.name} is offline (last seen ${fmt(runner.last_seen_at)}). Start it with Start BAH Runner to use Run Now.` });
-    return [runnerNote, ...table([["Task", (t) => h("div", {}, h("strong", { text: t.name }), t.description ? h("div", { class: "muted", text: t.description }) : null)],
+    return [runnerNote, ...table([["Report", (t) => h("div", {}, h("strong", { text: t.description || t.name }), t.description && t.description !== t.name ? h("div", { class: "muted", text: `Task: ${t.name}` }) : null)],
                   ["Schedule", (t) => schedText((t.schedules || [])[0])],
                   ["Next run", (t) => nextRun(t)],
                   ["Type", (t) => targetBadge(t.execution_target)],
@@ -320,8 +350,8 @@ const VIEWS = {
                  rows, "No tasks are assigned to you yet.")];
   },
   async runs() {
-    const rows = await api("/occurrences?select=id,kind,status,due_at,attempts,max_attempts,completed_at,tasks(name),executions(attempt_no,status,finished_at,row_count,validation_status,error_class)&order=due_at.desc&limit=100");
-    return table([["Task", (o) => (o.tasks || {}).name || "—"],
+    const rows = await api("/occurrences?select=id,kind,status,due_at,attempts,max_attempts,completed_at,tasks(name,description),executions(attempt_no,status,finished_at,row_count,validation_status,error_class)&order=due_at.desc&limit=100");
+    return table([["Task", (o) => repName(o.tasks)],
                   ["Due", (o) => fmt(o.due_at)],
                   ["Type", (o) => o.kind],
                   ["Status", (o) => badge(o.status)],
@@ -331,8 +361,8 @@ const VIEWS = {
                   ["Attempts", (o) => `${o.attempts} / ${o.max_attempts}`]], rows, "No task runs yet.");
   },
   async reports() {
-    const rows = await api("/report_files?select=id,file_name,size_bytes,uploaded_at,retain_until,status,occurrences(due_at,tasks(name))&status=eq.available&order=uploaded_at.desc&limit=100");
-    return table([["Report", (f) => h("div", {}, h("strong", { text: ((f.occurrences || {}).tasks || {}).name || "—" }), h("div", { class: "muted", text: f.file_name }))],
+    const rows = await api("/report_files?select=id,file_name,size_bytes,uploaded_at,retain_until,status,occurrences(due_at,tasks(name,description))&status=eq.available&order=uploaded_at.desc&limit=100");
+    return table([["Report", (f) => h("div", {}, h("strong", { text: repName((f.occurrences || {}).tasks) }), h("div", { class: "muted", text: f.file_name }))],
                   ["Created", (f) => fmt(f.uploaded_at)],
                   ["Size", (f) => `${Math.max(1, Math.round(f.size_bytes / 1024))} KB`],
                   ["Kept until", (f) => fmt(f.retain_until)],
@@ -340,8 +370,8 @@ const VIEWS = {
                  rows, "No reports available yet.");
   },
   async notifications() {
-    const rows = await api("/notifications?select=kind,status,created_at,sent_at,delivery_status,error_class,tasks(name)&order=created_at.desc&limit=100");
-    return table([["Task", (n) => (n.tasks || {}).name || "—"],
+    const rows = await api("/notifications?select=kind,status,created_at,sent_at,delivery_status,error_class,tasks(name,description)&order=created_at.desc&limit=100");
+    return table([["Task", (n) => repName(n.tasks)],
                   ["Type", (n) => n.kind === "success" ? "Report e-mail" : "Failure notice"],
                   ["Queued", (n) => fmt(n.created_at)],
                   ["E-mail", (n) => h("div", {}, badge(n.status === "sent" ? "accepted by mail server" : n.status),
