@@ -247,18 +247,77 @@ async function employeeDashboard() {
                 ["Due", (o) => fmt(o.due_at)], ["Status", (o) => badge(o.status)]], occ.slice(0, 10), "No runs in the last 7 days."))];
 }
 
+// ------------------------------------------------------------------ employee Run Now (own assigned tasks only)
+// bah.employee_run_now creates the run for the signed-in employee's own assignment; it executes only on that
+// employee's runner with the SAP password stored on their PC. Live SAP: explicit confirmation + all server checks.
+function runNowCell(t, ctx, openRun) {
+  const status = h("div", { class: "hint" });
+  const details = h("button", { class: "secondary small", text: "Details", onclick: () => taskDetail(t) });
+  const manual = t.status === "active" && t.execution_mode !== "scheduled_only";
+  const btn = manual ? h("button", { class: "small", text: "Run Now", disabled: !!openRun, onclick: () => runNowSelf(t, ctx, btn, status) }) : null;
+  if (openRun) watchRun(openRun.id, btn, status);
+  return h("div", {}, h("div", { class: "actions" }, details, btn), status);
+}
+
+async function runNowSelf(t, ctx, btn, status) {
+  const live = t.execution_target === "live_sap";
+  const say = (cls, text) => { status.className = cls; status.textContent = text; };
+  if (!ctx.runner) return say("error", "No BAH Runner is registered for you - install it from BAH Runner first.");
+  if (!ctx.online) return say("error", "Your BAH Runner is offline. Start it with Start BAH Runner on your PC, then try again.");
+  if (live && !ctx.runner.live_permitted) return say("error", "Your BAH Runner was not started for live SAP. Restart it with Start BAH Runner, then try again.");
+  if (live && !confirm(`LIVE SAP Run Now for "${t.name}".\n\nThe report runs on your own PC with your SAP user; keep Start BAH Runner open and be present for the SAP login.\n\nStart the live run now?`)) return;
+  if (!live && !confirm(`Run "${t.name}" now?`)) return;
+  btn.disabled = true; say("hint", "Starting…");
+  try {
+    const rows = await api("/rpc/employee_run_now", { method: "POST", body: JSON.stringify({ p_task: t.id, p_request_key: uid(), p_confirm_live: live }) });
+    const occ = (rows || [])[0];
+    if (!occ || !occ.occurrence_id) throw new Error("the run could not be queued");
+    watchRun(occ.occurrence_id, btn, status);
+  } catch (x) { say("error", `Not started: ${x.message}`); btn.disabled = false; }
+}
+
+// Live status of one run: queued -> running -> completed / failed (polls every 5 s for up to 45 minutes).
+function watchRun(occurrenceId, btn, status) {
+  const say = (cls, text) => { status.className = cls; status.textContent = text; };
+  const t0 = Date.now();
+  const tick = async () => {
+    if (!status.isConnected) return;                              // page changed: stop polling
+    let o;
+    try { o = (await api(`/occurrences?select=status,executions(attempt_no,status,row_count,error_class,error_detail)&id=eq.${occurrenceId}`))[0]; }
+    catch { setTimeout(tick, 10000); return; }
+    const e = ((o && o.executions) || []).sort((a, b) => b.attempt_no - a.attempt_no)[0];
+    const s = o ? o.status : "pending";
+    if (s === "pending" || s === "waiting_retry") say("hint", "Queued - waiting for your BAH Runner to pick it up…");
+    else if (s === "claimed") say("hint", "Running on your PC - keep Start BAH Runner open…");
+    else if (s === "succeeded") { say("hint ok-text", `Completed${e && e.row_count != null ? ` - ${e.row_count} rows` : ""}. See Execution History and Reports.`); if (btn) btn.disabled = false; return; }
+    else if (s === "failed") { say("error", `Failed${e && e.error_class ? `: ${e.error_class}${e.error_detail ? " - " + e.error_detail : ""}` : ""}. No automatic retry.`); if (btn) btn.disabled = false; return; }
+    else if (s === "cancelled") { say("error", "Cancelled."); if (btn) btn.disabled = false; return; }
+    if (Date.now() - t0 < 45 * 60000) setTimeout(tick, 5000);
+    else say("hint", "Still in progress - check Execution History later.");
+  };
+  tick();
+}
+
 const VIEWS = {
   dashboard: employeeDashboard,
   runner: runnerPage,
   async tasks() {
-    const rows = await api("/tasks?select=id,name,description,execution_target,execution_mode,status,schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status)&order=name");
-    return table([["Task", (t) => h("div", {}, h("strong", { text: t.name }), t.description ? h("div", { class: "muted", text: t.description }) : null)],
+    const [rows, runners, open] = await Promise.all([
+      api("/tasks?select=id,name,description,execution_target,execution_mode,status,schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status)&order=name"),
+      api(`/runners?select=name,last_seen_at,live_permitted&status=eq.active&employee_id=eq.${me.user_id}`),
+      api(`/occurrences?select=id,task_id,status&employee_id=eq.${me.user_id}&status=in.(pending,claimed,waiting_retry)&order=created_at.desc`)]);
+    const runner = runners[0] || null;
+    const ctx = { runner, online: !!runner && Date.now() - new Date(runner.last_seen_at).getTime() < 10 * 60000 };
+    const runnerNote = !runner ? h("div", { class: "notice warn", text: "No BAH Runner is registered for you yet - see BAH Runner to install it. Run Now needs it." })
+      : ctx.online ? h("div", { class: "notice", text: `Your BAH Runner ${runner.name} is online${runner.live_permitted ? " and allowed to run live SAP reports" : ""}.` })
+      : h("div", { class: "notice warn", text: `Your BAH Runner ${runner.name} is offline (last seen ${fmt(runner.last_seen_at)}). Start it with Start BAH Runner to use Run Now.` });
+    return [runnerNote, ...table([["Task", (t) => h("div", {}, h("strong", { text: t.name }), t.description ? h("div", { class: "muted", text: t.description }) : null)],
                   ["Schedule", (t) => schedText((t.schedules || [])[0])],
                   ["Next run", (t) => nextRun(t)],
                   ["Type", (t) => targetBadge(t.execution_target)],
                   ["Status", (t) => badge(t.status)],
-                  ["", (t) => h("button", { class: "secondary", text: "Details", onclick: () => taskDetail(t) })]],
-                 rows, "No tasks are assigned to you yet.");
+                  ["", (t) => runNowCell(t, ctx, open.find((o) => o.task_id === t.id))]],
+                 rows, "No tasks are assigned to you yet.")];
   },
   async runs() {
     const rows = await api("/occurrences?select=id,kind,status,due_at,attempts,max_attempts,completed_at,tasks(name),executions(attempt_no,status,finished_at,row_count,validation_status,error_class)&order=due_at.desc&limit=100");
