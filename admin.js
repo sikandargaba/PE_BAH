@@ -159,10 +159,10 @@ async function editTask(id, people) {
   }
   const asList = (v) => (Array.isArray(v) ? v : String(v || "").split(/[,;]+/)).map((x) => String(x).trim()).filter(Boolean);
   const f = {
-    name: inp(t.name, { maxlength: "120", required: true }), description: inp(t.description, { maxlength: "200" }),
+    name: inp(t.name, { maxlength: "120", required: true, placeholder: "e.g. Monthly Criticare Inventory Review" }),
     target: sel(t.execution_target, [["live_sap", "Live SAP (manual, attended)"], ["synthetic", "Synthetic (test)"], ["fixture", "Fixture (test)"]]),
     mode: sel(t.execution_mode, [["manual_only", "Manual Run Now only"], ["scheduled_and_manual", "Scheduled and manual"], ["scheduled_only", "Scheduled only"]]),
-    status: sel(t.status, [["active", "Active"], ["paused", "Paused"], ["inactive", "Inactive"]]),
+    status: sel(t.status, [["active", "Active"], ["inactive", "Inactive"], ...(t.status === "paused" ? [["paused", "Paused"]] : [])]),
     freq: sel(sc && sc.status !== "inactive" ? sc.frequency : "", [["", "No schedule (manual only)"], ["daily", "Daily"], ["weekly", "Weekly"], ["fortnightly", "Every 14 days"], ["monthly", "Monthly"]]),
     time: inp(sc ? sc.run_time.slice(0, 5) : "08:00", { type: "time" }),
     weekday: sel(sc && sc.weekday ? String(sc.weekday) : "1", [["1", "Monday"], ["2", "Tuesday"], ["3", "Wednesday"], ["4", "Thursday"], ["5", "Friday"], ["6", "Saturday"], ["7", "Sunday"]]),
@@ -180,30 +180,25 @@ async function editTask(id, people) {
   const rTo = emailChips(asList(em.to), "name@company.com"), rCc = emailChips(asList(em.cc), "Add CC"), rBcc = emailChips(asList(em.bcc), "Add BCC");
 
   // ---- Report Template (the task keeps its own copy/version of the template configuration)
-  const tplLabel = (x) => `${tplName(x)} (v${x.version})${x.status === "active" ? "" : " - inactive"}`;
+  const tplLabel = (x) => `${tplName(x)}${x.status === "active" ? "" : " (inactive)"}`;
   const choosable = templates.filter((x) => x.status === "active" || x.id === t.template_id);
-  f.tpl = sel(t.template_id || "", [["", id && cfg ? "— keep the task's saved configuration (no template) —" : "— choose a report template —"],
+  f.tpl = sel(t.template_id || "", [["", id && cfg ? `— ${t.description || "saved report configuration"} (no template) —` : "— choose a report —"],
                                     ...choosable.map((x) => [x.id, tplLabel(x)])]);
   const current = templates.find((x) => x.id === t.template_id);
   const upgrade = chk(false);
-  const summary = h("div", {});
-  let pending = null;
+  let pending = null;                               // template chosen in this edit -> its configuration is copied on save
   const currentConfig = () => (pending ? tplConfig(pending) : cfg);
+  // Report Name = the template Description of the configuration the task uses (its own saved snapshot).
+  const reportName = () => (pending ? tplName(pending) : (cfg && cfg.report_name) || t.description || "");
   const show = () => {
     const tp = templates.find((x) => x.id === f.tpl.value);
-    const fresh = tp && (tp.id !== t.template_id || upgrade.checked);
-    pending = fresh ? tp : null;
-    const c = currentConfig();
-    summary.replaceChildren(c ? configSummary(c, fresh ? `from template "${tplName(tp)}" v${tp.version}` :
-                              `saved with the task${t.template_version ? ` (template v${t.template_version})` : ""}`)
-                              : h("div", { class: "hint", text: "Choose a report template to load the SAP report configuration." }));
-    if (fresh && !f.description.value.trim()) f.description.value = tplName(tp);
+    pending = tp && (tp.id !== t.template_id || upgrade.checked) ? tp : null;
   };
   f.tpl.addEventListener("change", () => { upgrade.checked = false; show(); });
   upgrade.addEventListener("change", show);
   show();
   const upgradeRow = current && t.template_version && current.version > t.template_version
-    ? field(`Update to the template's current version (v${current.version}); this task uses v${t.template_version}`, upgrade) : null;
+    ? field("Use the report's latest saved configuration (this task keeps its earlier copy until ticked)", upgrade) : null;
 
   // ---- dynamic schedule: only the fields the frequency needs
   const sTime = field("Time (Asia/Karachi)", f.time), sWeek = field("Weekday", f.weekday), sAnchor = field("First run date", f.anchor, "Repeats every 14 days from this date"),
@@ -248,7 +243,7 @@ async function editTask(id, people) {
     const d = (x) => x ? `${String(x.getUTCDate()).padStart(2, "0")}.${String(x.getUTCMonth() + 1).padStart(2, "0")}.${x.getUTCFullYear()}` : "-";
     const firstEmp = assignBoxes.find((x) => x.box.checked);
     previewEmail({ to: rTo.values(), cc: rCc.values(), bcc: rBcc.values(), subject: f.esub.value.trim(), body: f.ebody.value, format: f.efmt.value,
-      values: { report_name: f.description.value.trim() || f.name.value.trim() || "Report", task_name: f.description.value.trim() || f.name.value.trim(),
+      values: { report_name: reportName() || "Report", task_name: reportName() || f.name.value.trim(),
                 period_start: d(r && r[0]), period_end: d(r && r[1]),
                 execution_date: new Date(Date.now() + 5 * 3600000).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }).replace(/ /g, "-"),
                 assigned_employee: firstEmp ? firstEmp.p.full_name : "Employee name", execution_status: "Succeeded", failure_reason: "-" } });
@@ -261,10 +256,11 @@ async function editTask(id, people) {
       if (rTo.pendingInvalid() || rCc.pendingInvalid() || rBcc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
       if (f.eon.checked && !to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
       const config = currentConfig();
-      if (!config) throw new Error("Choose a report template.");
+      if (!config) throw new Error("Choose a report name.");
       if (f.freq.value === "fortnightly" && !f.anchor.value) throw new Error("Every 14 days needs a first run date.");
       const keepTpl = !pending && f.tpl.value === (t.template_id || "");
-      const row = { name: f.name.value.trim(), description: f.description.value.trim() || (pending ? tplName(pending) : null),
+      if (!f.name.value.trim()) throw new Error("Task name is required.");
+      const row = { name: f.name.value.trim(), description: reportName() || null,
                     connection_id: conn.id, execution_target: f.target.value, execution_mode: f.mode.value, status: f.status.value,
                     template_id: pending ? pending.id : keepTpl ? (t.template_id || null) : null,
                     template_version: pending ? pending.version : keepTpl ? (t.template_version || null) : null };
@@ -297,11 +293,12 @@ async function editTask(id, people) {
     pageHead(id ? `Edit task: ${t.name}` : "New task", id ? "Report task, schedule, assignees and e-mail delivery." : "Create a report task from a report template."),
     id && t.execution_target === "live_sap" ? h("div", { class: "notice", text: SYNC_NOTE }) : null,
     h("section", { class: "card form-card" }, h("h2", { text: "1. Task details" }),
-      h("div", { class: "grid-2" }, field("Task name", f.name), field("Description", f.description, "Shown in lists, history and e-mails ({report_name})."),
-        h("div", { class: "span-2" }, field("Report template", f.tpl, "Loads the template's SAP configuration into this task; later template edits do not change the task.")),
+      h("div", { class: "grid-2" },
+        field("Task name", f.name, "Your own name for this task."),
+        field("Report name", f.tpl, "From Report Templates. Its saved SAP configuration is used; later template edits do not change this task."),
         field("Execution mode", f.mode), field("Status", f.status),
-        field("Runs on", f.target, "Live SAP runs only by Run Now, attended, on the employee's own runner."), upgradeRow),
-      summary),
+        field("Runs on", f.target, "Live SAP runs only by Run Now, attended, on the employee's own runner."),
+        upgradeRow ? h("div", { class: "span-2" }, upgradeRow) : null)),
     h("section", { class: "card form-card" }, h("h2", { text: "2. Schedule" }),
       h("div", { class: "grid-3" }, field("Frequency", f.freq), sTime, sWeek, sAnchor, sMday, sLast), schedHint),
     h("section", { class: "card form-card" }, h("div", { class: "card-head" }, h("h2", { text: "3. Assigned employees" }), countBadge),
