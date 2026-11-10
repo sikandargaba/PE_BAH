@@ -130,19 +130,81 @@ const TABS = ["My work", ["dashboard", "My Dashboard", "Your tasks, recent runs 
   ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH for your tasks."],
   "Account", ["runner", "BAH Runner", "Download, install and update the BAH Runner on your PC."]];
 
+// ------------------------------------------------------------------ icons (Lucide-style line icons, static markup)
+const ICONS = {
+  dashboard: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
+  templates: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+  tasks: '<path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  runner: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
+  history: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
+  reports: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/>',
+  mail: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+  releases: '<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><path d="m3.3 7 8.7 5 8.7-5"/>',
+  settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  panel: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
+  cloud: '<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>',
+};
+const NAV_ICON = { admin_dashboard: "dashboard", dashboard: "dashboard", admin_templates: "templates", admin_tasks: "tasks", tasks: "tasks",
+  admin_people: "users", runner: "runner", admin_runs: "history", runs: "history", reports: "reports", notifications: "mail",
+  admin_releases: "releases", admin_settings: "settings" };
+function icon(name) {
+  const doc = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="i" aria-hidden="true">${ICONS[name] || ""}</svg>`, "image/svg+xml");
+  return document.importNode(doc.documentElement, true);
+}
+const initials = (n) => String(n || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((x) => x[0].toUpperCase()).join("") || "?";
+const SECTION_LABEL = (s) => s.toLowerCase().replace(/(^|\s|&\s)\S/g, (c) => c.toUpperCase());
+document.addEventListener("click", () => { document.querySelectorAll(".menu").forEach((m) => { m.hidden = true; }); });   // close the profile menu
+let compactNav = (() => { try { return localStorage.getItem("bah.nav.compact") === "1"; } catch { return false; } })();
+
 function layout(nav) {
   const signOut = async () => {
     try { await fetch(`${AUTH}/logout?scope=local`, { method: "POST", headers: { apikey: KEY, authorization: `Bearer ${session.access_token}` } }); } catch { /* ignore */ }
     signOutLocal();
   };
-  return h("div", { class: "shell" },
-    h("header", { class: "topbar" }, BRAND(me.is_admin ? "Administrator dashboard" : "Employee dashboard"),
-      h("div", { class: "spacer" }), h("span", { class: "cloudflag", text: "CLOUD" }),
-      h("div", { class: "userbox" }, h("span", { text: me.full_name }), h("span", { class: "role", text: ROLE_LABEL() }),
-        h("button", { class: "small", text: "Sign out", onclick: signOut }))),
-    h("nav", { class: "sidebar" }, nav.map((n) => typeof n === "string" ? h("div", { class: "section", text: n })
-      : h("a", { class: n[0] === tab ? "active" : "", text: n[1], href: "#", onclick: (e) => { e.preventDefault(); tab = n[0]; render(); } }))),
-    h("main", { id: "main" }));
+  const go = (k) => { tab = k; render(); };
+  // group the flat nav list ("SECTION", [key, label, sub], ...) into sidebar groups
+  const groups = [];
+  for (const n of nav) { if (typeof n === "string") groups.push({ title: n, items: [] }); else (groups[groups.length - 1] || groups[groups.push({ title: "", items: [] }) - 1]).items.push(n); }
+  const section = (groups.find((g) => g.items.some((n) => n[0] === tab)) || { title: "" }).title;
+  const current = nav.find((n) => typeof n !== "string" && n[0] === tab);
+  const shell = h("div", { class: compactNav ? "shell compact" : "shell" });
+  const collapse = h("button", { type: "button", class: "sb-collapse", title: "Collapse / expand the menu", onclick: () => {
+    compactNav = !compactNav; shell.classList.toggle("compact", compactNav);
+    try { localStorage.setItem("bah.nav.compact", compactNav ? "1" : "0"); } catch { /* private mode */ }
+  } }, icon("panel"), h("span", { text: "Collapse menu" }));
+  const sidebar = h("aside", { class: "sidebar" },
+    h("div", { class: "sb-brand" }, h("img", { src: "logo.svg", alt: "BAH" }), h("div", { class: "sb-title" }, "BAH", h("small", { text: "Business Automation Hub" }))),
+    h("nav", { class: "sb-nav", "aria-label": "Main" }, groups.map((g) => h("div", { class: "sb-group" }, g.title ? h("div", { class: "sb-section", text: g.title }) : null,
+      g.items.map((n) => h("a", { class: n[0] === tab ? "sb-link active" : "sb-link", href: "#", title: n[1], "aria-current": n[0] === tab ? "page" : null,
+        onclick: (e) => { e.preventDefault(); go(n[0]); } }, icon(NAV_ICON[n[0]] || "dashboard"), h("span", { text: n[1] })))))),
+    h("div", { class: "sb-foot" },
+      h("div", { class: "sb-user", title: `${me.full_name} · ${ROLE_LABEL()}` }, h("div", { class: "avatar sm", text: initials(me.full_name) }),
+        h("div", {}, h("strong", { text: me.full_name }), h("small", { text: ROLE_LABEL() }))),
+      collapse));
+  // header: breadcrumb, environment, notifications, profile menu
+  const menu = h("div", { class: "menu", hidden: true },
+    h("div", { class: "menu-head" }, h("strong", { text: me.full_name }), h("small", { text: ROLE_LABEL() })),
+    h("button", { type: "button", class: "menu-item", onclick: () => go("runner") }, icon("runner"), "BAH Runner"),
+    h("button", { type: "button", class: "menu-item danger", onclick: signOut }, icon("logout"), "Sign out"));
+  const profileBtn = h("button", { type: "button", class: "profile-btn", "aria-haspopup": "menu", onclick: (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; } },
+    h("div", { class: "avatar sm", text: initials(me.full_name) }), h("div", { class: "who" }, h("strong", { text: me.full_name }), h("small", { text: ROLE_LABEL() })), icon("chevron"));
+  const bell = h("button", { type: "button", class: "icon-btn", title: "E-mail notifications", onclick: () => go("notifications") }, icon("bell"));
+  const header = h("header", { class: "topbar" },
+    h("div", { class: "crumbs" }, section ? h("span", { text: SECTION_LABEL(section) }) : null, section ? h("span", { class: "sep", text: "/" }) : null,
+      h("strong", { text: current ? current[1] : "" })),
+    h("div", { class: "spacer" }),
+    h("span", { class: "env-pill", title: "Cloud BAH portal" }, icon("cloud"), h("span", { text: "Cloud" })),
+    bell, h("div", { class: "profile" }, profileBtn, menu));
+  // failed e-mails in the last 7 days (the database limits employees to their own)
+  api(`/notifications?select=id&status=eq.failed&created_at=gte.${new Date(Date.now() - 7 * 86400000).toISOString()}&limit=99`)
+    .then((rows) => { if (rows && rows.length) { bell.append(h("span", { class: "dot", text: String(rows.length) })); bell.title = `${rows.length} failed e-mail(s) in the last 7 days`; } })
+    .catch(() => {});
+  shell.append(sidebar, h("div", { class: "main-col" }, header, h("main", { id: "main" })));
+  return shell;
 }
 
 // A view returns either a list of nodes, or { actions: [buttons for the page header], content: [nodes] }.
