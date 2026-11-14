@@ -267,6 +267,8 @@ function periodText(rule, customFrom, customTo, now) {
   const f = (d) => `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
   return r ? `${f(r[0])} to ${f(r[1])}` : rule === "custom" ? "choose From and To" : rule === "none" ? "Not applicable" : "—";
 }
+// A report with no date parameters: the explicit "Not applicable" rule, or neither a date rule nor any date field configured.
+const noDates = (c) => !!c && (c.date_rule === "none" || (!c.date_rule && !(c.date_fields || []).length));
 // Same type badges as the local BAH. Live SAP tasks are executed by the LOCAL BAH on their schedule; the cloud never runs them.
 const TARGETS = { synthetic: ["Synthetic", "info"], fixture: ["Fixture", "warn"], live_sap: ["LIVE SAP", "bad"] };
 const targetBadge = (t) => h("span", { class: `badge ${(TARGETS[t] || ["", ""])[1]}`, text: (TARGETS[t] || [t])[0] });

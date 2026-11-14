@@ -431,7 +431,7 @@ async function editTask(id) {
   // A report whose date rule is "none" has no reporting period, so {period_start}/{period_end} do not apply and its
   // standard e-mail text (which contains them) would show "-" - say so instead of offering them.
   periodUi = () => {
-    const c = currentConfig(), has = !c || c.date_rule !== "none";
+    const has = !noDates(currentConfig());
     form.querySelectorAll(".ph-period").forEach((b) => { b.hidden = !has; });
     subjHint.textContent = has ? "Leave empty for the standard subject (report name and period)."
       : "This report has no reporting period: write your own subject and body (for example {report_name} - {execution_date}); the standard text mentions a period.";
@@ -595,8 +595,8 @@ async function adminTemplates() {
   return { actions: [h("button", { class: "primary", text: "New template", onclick: () => editTemplate(null) })],
     content: table([["Description", (t) => h("strong", { text: tplName(t) })],
               ["Source", () => "SAP Fiori"], ["T-Code", (t) => t.config.tcode || "—"], ["Variant", (t) => t.config.variant || "—"],
-              ["Date rule", (t) => RULE_LABELS[t.config.date_rule] || t.config.date_rule || "—"],
-              ["Reporting period (today)", (t) => periodText(t.config.date_rule, t.config.custom_from, t.config.custom_to)],
+              ["Date rule", (t) => noDates(t.config) ? RULE_LABELS.none : RULE_LABELS[t.config.date_rule] || t.config.date_rule || "—"],
+              ["Reporting period (today)", (t) => noDates(t.config) ? "Not applicable" : periodText(t.config.date_rule, t.config.custom_from, t.config.custom_to)],
               ["Version", (t) => String(t.version)], ["Status", (t) => badge(t.status)],
               ["", (t) => h("div", { class: "actions" }, h("button", { class: "small", text: "Edit", onclick: () => editTemplate(t) }))]],
              rows, "No templates yet - create the first one.") };
@@ -606,7 +606,7 @@ function editTemplate(t) {
   const c = (t && t.config) || { date_rule: "previous_month", output: {} };
   const f = { desc: inp(tplName(t), { maxlength: "120", required: true }),
     tcode: inp(c.tcode, { required: true, maxlength: "40" }), variant: inp(c.variant),
-    dates: inp((c.date_fields || []).join(", ")), rule: sel(c.date_rule, DATE_RULES.map((r) => [r, RULE_LABELS[r] || r])),
+    dates: inp((c.date_fields || []).join(", ")), rule: sel(noDates(c) ? "none" : c.date_rule, DATE_RULES.map((r) => [r, RULE_LABELS[r] || r])),
     from: inp(c.custom_from, { type: "date" }), to: inp(c.custom_to, { type: "date" }),
     pattern: inp((c.output || {}).filename_pattern || "{ReportName}_{Period}"),
     status: sel(t ? t.status : "active", [["active", "Active"], ["inactive", "Inactive"]]) };
@@ -642,6 +642,8 @@ function editTemplate(t) {
         date_fields: f.rule.value === "none" ? [] : f.dates.value.split(",").map((x) => x.trim()).filter(Boolean),
         date_rule: f.rule.value, custom_from: f.rule.value === "custom" ? f.from.value : null,
         custom_to: f.rule.value === "custom" ? f.to.value : null, output: { ...(c.output || {}), filename_pattern: f.pattern.value.trim() } };
+      // "Not applicable" is stored as NO date keys at all (nothing artificial; every runner reads that as "no dates").
+      if (f.rule.value === "none") { delete config.date_rule; delete config.custom_from; delete config.custom_to; }
       // Description is the single report identifier (also stored as the template's internal name).
       const row = { name: desc, description: desc, connector: "sap_fiori", config, status: f.status.value };
       if (t) await api(`/report_templates?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ ...row, version: t.version + 1 }) });
