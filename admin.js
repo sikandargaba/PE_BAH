@@ -67,7 +67,7 @@ async function adminTasks() {
     api("/tasks?select=id,name,description,execution_target,execution_mode,status,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&order=name"),
     api("/profiles?select=id,full_name,email,role,status&order=full_name")]);
   const name = (id) => (people.find((p) => p.id === id) || {}).full_name || "?";
-  return { actions: [h("button", { class: "primary", text: "New task", onclick: () => editTask(null, people) })],
+  return { actions: [h("button", { class: "primary", text: "New task", onclick: () => editTask(null) })],
     content: table([["Description", (t) => h("div", {}, h("strong", { text: t.description || t.name }), t.description && t.description !== t.name ? h("div", { class: "muted", text: `Task: ${t.name}` }) : null)],
               ["T-Code", (t) => ((t.task_configs || {}).config || {}).tcode || "—"],
               ["Schedule", (t) => schedText((t.schedules || [])[0])],
@@ -77,7 +77,7 @@ async function adminTasks() {
               ["Assignments", (t) => (t.assignments || []).filter((a) => a.status === "active").map((a) => name(a.employee_id)).join(", ") || "—"],
               ["Status", (t) => badge(t.status)],
               ["", (t) => h("div", { class: "actions" },
-                 h("button", { class: "small", text: "Edit", onclick: () => editTask(t.id, people) }),
+                 h("button", { class: "small", text: "Edit", onclick: () => editTask(t.id) }),
                  h("button", { class: "small", text: "Run Now", disabled: t.status !== "active" || t.execution_mode === "scheduled_only",
                                onclick: () => runNow(t) }))]],
              tasks, "No tasks yet - create the first one.") };
@@ -141,7 +141,104 @@ function previewEmail(o) {
   document.body.append(overlay);
 }
 
-async function editTask(id, people) {
+// ------------------------------------------------------------------ assigned-employees picker (searchable multi-select)
+// Selection lives on each entry's `box.checked` - the flag the save logic has always read - so assignments are
+// written exactly as before. Entries are { p: profile, box: { checked } }. A search matches name or e-mail
+// (case-insensitive, every typed word must appear). Only the first PICKER_MAX_ROWS hits are drawn so a large
+// organisation stays fast; the typed words narrow the rest.
+const PICKER_MAX_ROWS = 50;
+function matchEmployees(entries, query, limit = PICKER_MAX_ROWS) {
+  const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+  const hits = words.length
+    ? entries.filter(({ p }) => { const hay = `${p.full_name || ""} ${p.email || ""}`.toLowerCase(); return words.every((w) => hay.includes(w)); })
+    : entries;
+  return { rows: hits.slice(0, limit), total: hits.length };
+}
+function employeePicker({ load, onLoaded, onChange }) {
+  const pid = `emp-${uid()}`;
+  let entries = [], ready = false, shown = [], hi = -1;
+  const chips = h("div", { class: "chips" });
+  const input = h("input", { type: "text", class: "emp-search", placeholder: "Search employees by name or e-mail", autocomplete: "off",
+    role: "combobox", "aria-autocomplete": "list", "aria-expanded": "false", "aria-controls": pid, "aria-label": "Search employees", disabled: true });
+  const panel = h("div", { class: "emp-panel", id: pid, role: "listbox", "aria-multiselectable": "true", hidden: true });
+  const status = h("div", { class: "emp-status", role: "status" });
+  const chipRow = h("div", { class: "chip-row" }, chips, input);
+  const root = h("div", { class: "emp-picker" }, h("div", { class: "emp-anchor" }, chipRow, panel), status);
+
+  const setStatus = (text, error, retry) => {
+    status.className = error ? "emp-status error" : "emp-status";
+    status.replaceChildren(...[text, retry ? h("button", { type: "button", class: "small secondary", text: "Retry", onclick: () => start() }) : null].filter(Boolean));
+  };
+  const selected = () => entries.filter((x) => x.box.checked);
+  const drawChips = () => chips.replaceChildren(...selected().map((x) => h("span", { class: "chip", title: x.p.email || "" }, x.p.full_name,
+    h("button", { type: "button", class: "chip-x", "aria-label": `Remove ${x.p.full_name}`, text: "×", onclick: () => toggle(x, false) }))));
+  const drawList = () => {
+    const keep = panel.scrollTop;
+    const { rows, total } = matchEmployees(entries, input.value);
+    shown = rows; hi = rows.length ? Math.min(hi, rows.length - 1) : -1;
+    if (hi >= 0) input.setAttribute("aria-activedescendant", `${pid}-${hi}`); else input.removeAttribute("aria-activedescendant");
+    if (!rows.length) { panel.replaceChildren(h("div", { class: "emp-msg", text: `No employees match “${input.value.trim()}”.` })); return; }
+    panel.replaceChildren(...[...rows.map((x, i) => h("div", { class: `emp-opt${x.box.checked ? " on" : ""}${i === hi ? " hi" : ""}`, role: "option", id: `${pid}-${i}`,
+        "aria-selected": x.box.checked ? "true" : "false",
+        onmousedown: (e) => e.preventDefault(),                 // keep the keyboard focus in the search box
+        onclick: () => toggle(x) },
+      h("span", { class: "emp-tick", "aria-hidden": "true", text: x.box.checked ? "✓" : "" }),
+      h("span", { class: "emp-name" }, h("strong", { text: x.p.full_name }),
+        x.p.email || x.p.role === "admin" ? h("small", { text: [x.p.email, x.p.role === "admin" ? "Administrator" : ""].filter(Boolean).join(" · ") }) : null))),
+      total > rows.length ? h("div", { class: "emp-msg", text: `Showing ${rows.length} of ${total} - type more to narrow the list.` }) : null].filter(Boolean));
+    panel.scrollTop = keep;
+  };
+  const open = () => { if (!ready) return; panel.hidden = false; input.setAttribute("aria-expanded", "true"); drawList(); };
+  const close = () => { panel.hidden = true; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); hi = -1; };
+  function toggle(x, on = !x.box.checked) { x.box.checked = on; drawChips(); if (!panel.hidden) drawList(); onChange(); }
+
+  input.addEventListener("focus", open);
+  input.addEventListener("click", open);
+  input.addEventListener("input", () => { hi = 0; open(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {                                    // never submit the whole task form from this box
+      e.preventDefault();
+      if (!panel.hidden && shown[hi]) toggle(shown[hi]);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (panel.hidden) { open(); return; }
+      if (!shown.length) return;
+      hi = e.key === "ArrowDown" ? (hi + 1) % shown.length : (hi <= 0 ? shown.length - 1 : hi - 1);
+      drawList();
+      const el = document.getElementById(`${pid}-${hi}`);
+      if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Escape") {
+      if (!panel.hidden) { e.preventDefault(); close(); }
+    } else if (e.key === "Backspace" && !input.value) {          // empty box: remove the most recent chip
+      const s = selected();
+      if (s.length) toggle(s[s.length - 1], false);
+    }
+  });
+  chipRow.addEventListener("click", (e) => { if (!e.target.closest("button")) input.focus(); });
+  const outside = (e) => {
+    if (!root.isConnected) { document.removeEventListener("mousedown", outside); return; }   // the form was closed
+    if (!root.contains(e.target)) close();
+  };
+  document.addEventListener("mousedown", outside);
+  root.addEventListener("focusout", (e) => { if (!root.contains(e.relatedTarget)) close(); });
+
+  async function start() {
+    ready = false; input.disabled = true; close(); setStatus("Loading employees…");
+    let loaded = null;
+    try { loaded = await load(); } catch (e) { loaded = null; }
+    if (!loaded) {
+      entries = [];
+      setStatus("Could not load the employee list; assignments will be left unchanged.", true, true);
+    } else {
+      entries = loaded; ready = entries.length > 0; input.disabled = !ready;
+      setStatus(ready ? "" : "No active employees.");
+    }
+    onLoaded(entries, !!loaded); drawChips(); onChange();
+  }
+  return { el: root, start };
+}
+
+async function editTask(id) {
   const conn = (await api("/app_connections?select=id,code,display_name&status=eq.active"))[0];
   if (!conn) { alert("No active SAP connection configured."); return; }
   let t = { name: "", description: "", execution_target: "live_sap", execution_mode: "manual_only", status: "active" };
@@ -214,14 +311,19 @@ async function editTask(id, people) {
   for (const el of [f.freq, f.lastday, f.target]) el.addEventListener("change", syncSched);
   syncSched();
 
-  // ---- employees
-  const assignBoxes = people.filter((p) => p.status === "active").map((p) => {
-    const a = asg.find((x) => x.employee_id === p.id);
-    return { p, a, box: chk(a && a.status === "active") };
-  });
+  // ---- employees: searchable multi-select, read fresh from the profiles table each time the form opens, so new or
+  // newly activated employees appear without any change here. Only active employees are offered (as before);
+  // the existing assignment rows still decide what is already ticked, and the save loop below is unchanged.
+  let assignBoxes = [];                            // { p, a, box: { checked } } - the shape the save logic has always used
   const countBadge = h("span", { class: "badge info" });
   const syncCount = () => { const n = assignBoxes.filter((x) => x.box.checked).length; countBadge.textContent = `${n} selected`; };
-  assignBoxes.forEach((x) => x.box.addEventListener("change", syncCount));
+  const picker = employeePicker({
+    load: async () => (await api("/profiles?select=id,full_name,email,role,status&order=full_name"))
+      .filter((p) => p.status === "active")
+      .map((p) => { const a = asg.find((x) => x.employee_id === p.id); return { p, a, box: { checked: !!(a && a.status === "active") } }; }),
+    onLoaded: (entries) => { assignBoxes = entries; save.disabled = false; },
+    onChange: syncCount,
+  });
   syncCount();
 
   // ---- e-mail on/off makes the dependent sections visibly inactive
@@ -302,9 +404,7 @@ async function editTask(id, people) {
     h("section", { class: "card form-card" }, h("h2", { text: "2. Schedule" }),
       h("div", { class: "grid-3" }, field("Frequency", f.freq), sTime, sWeek, sAnchor, sMday, sLast), schedHint),
     h("section", { class: "card form-card" }, h("div", { class: "card-head" }, h("h2", { text: "3. Assigned employees" }), countBadge),
-      assignBoxes.length ? h("div", { class: "check-grid" }, assignBoxes.map(({ p, box }) => h("label", { class: "check-card" }, box,
-        h("span", {}, h("strong", { text: p.full_name }), h("small", { text: p.role === "admin" ? "Administrator" : "Employee" })))))
-        : h("div", { class: "empty", text: "No active employees." })),
+      picker.el),
     h("section", { class: "card form-card" }, h("div", { class: "card-head" }, h("h2", { text: "4. E-mail configuration" }),
         h("label", { class: "toggle" }, f.eon, " Send report e-mail")),
       emailBody),
@@ -325,6 +425,8 @@ async function editTask(id, people) {
                                              field("Send a failure e-mail when the run fails", f.nfail)), notifyHint);
   syncEmail();
   mainArea().replaceChildren(form);
+  save.disabled = true;                            // until the employee list has loaded (re-enabled by onLoaded, success or failure)
+  picker.start();
 }
 
 // Template identity = its Description (falls back to the stored name for older templates).

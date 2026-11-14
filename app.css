@@ -213,11 +213,30 @@ button.ph:hover { background: var(--teal-100); color: var(--teal-700); }
 button.chip-x { height: 22px; width: 22px; padding: 0; justify-content: center; border: 0; box-shadow: none; background: transparent; color: var(--teal-700); font-size: 15px; border-radius: 50%; }
 button.chip-x:hover { background: var(--bad-bg); color: var(--bad); }
 .chip-msg { font-size: var(--fs-xs); font-weight: 400; }
-.check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: var(--s3); }
-.check-card { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s4); border: 1px solid var(--border); border-radius: var(--r); cursor: pointer; background: var(--surface); transition: border-color .12s, background .12s; }
-.check-card:hover { border-color: var(--border-strong); }
-.check-card:has(input:checked) { border-color: var(--teal-500); background: var(--teal-50); }
-.check-card small { display: block; color: var(--muted); font-size: var(--fs-xs); }
+/* Assigned employees: searchable multi-select. Selected people are .chip pills in the input row (same look as the
+   e-mail recipient chips); the result list is a dropdown under it. */
+.emp-picker { display: flex; flex-direction: column; gap: 6px; }
+.emp-anchor { position: relative; }
+.emp-picker .chip-row { cursor: text; max-height: 132px; overflow-y: auto; }
+.emp-picker .chip-row input { flex: 1 1 220px; }
+.emp-picker .chip-row input:disabled { background: transparent; cursor: not-allowed; }
+.emp-panel { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 6; max-height: 288px; overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r); box-shadow: var(--shadow-lg); padding: 4px; }
+.emp-panel[hidden] { display: none; }
+.emp-opt { display: flex; align-items: center; gap: var(--s3); min-height: 44px; padding: 6px 10px; border-radius: var(--r-sm); cursor: pointer; }
+.emp-opt:hover, .emp-opt.hi { background: var(--surface-2); }
+.emp-opt.on { background: var(--teal-50); }
+.emp-opt.on.hi, .emp-opt.on:hover { background: var(--teal-100); }
+.emp-tick { flex: none; display: grid; place-items: center; width: 18px; height: 18px; border: 1.5px solid var(--border-strong); border-radius: 4px;
+  background: var(--surface); color: #fff; font-size: 12px; line-height: 1; }
+.emp-opt.on .emp-tick { background: var(--brand); border-color: var(--brand); }
+.emp-name { min-width: 0; }
+.emp-name strong { display: block; font-size: var(--fs); font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.emp-name small { display: block; color: var(--muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.emp-msg { padding: 12px; text-align: center; color: var(--muted); font-size: var(--fs-sm); }
+.emp-status { display: flex; align-items: center; gap: var(--s3); font-size: var(--fs-xs); color: var(--muted); }
+.emp-status:empty { display: none; }
+.emp-status.error { color: var(--bad); }
 .toggle { display: inline-flex; align-items: center; gap: var(--s2); font-weight: 600; color: var(--text); cursor: pointer; }
 .muted-section { opacity: .5; }
 details.subsection { margin-top: var(--s5); border: 1px solid var(--border); border-radius: var(--r); padding: 0 var(--s4); background: var(--surface-2); }
