@@ -4,7 +4,7 @@
 "use strict";
 
 const DATE_RULES = ["today", "previous_day", "current_month", "previous_month", "current_week", "previous_week",
-                    "rolling_7_days", "rolling_30_days", "rolling_90_days", "custom"];
+                    "rolling_7_days", "rolling_30_days", "rolling_90_days", "custom", "none"];
 const EMAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
 const list = (s) => String(s || "").split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/-/g, "").slice(0, 32);
@@ -17,7 +17,8 @@ function field(label, input, hint) {
 }
 const RULE_LABELS = { today: "Today (execution date)", previous_day: "Previous Day", current_month: "Current Month (to date)",
   previous_month: "Previous Month", current_week: "Current Week (to date)", previous_week: "Previous Week",
-  rolling_7_days: "Rolling last 7 days", rolling_30_days: "Rolling last 30 days", rolling_90_days: "Rolling last 90 days", custom: "Custom range" };
+  rolling_7_days: "Rolling last 7 days", rolling_30_days: "Rolling last 30 days", rolling_90_days: "Rolling last 90 days", custom: "Custom range",
+  none: "Not applicable (no dates)" };
 const SYNC_NOTE = "Synchronised from the local BAH: description, execution mode, status, report parameters, e-mail settings and schedule " +
   "are maintained in the local BAH portal and overwrite this copy within 15 minutes (local wins). The local BAH runs this report; the cloud sends its e-mail.";
 
@@ -120,7 +121,7 @@ function emailChips(initial, placeholder) {
 const PLACEHOLDERS = ["{report_name}", "{period_start}", "{period_end}", "{execution_date}", "{assigned_employee}", "{execution_status}"];
 function placeholderBar(target) {
   return h("div", { class: "ph-bar" }, h("span", { class: "hint", text: "Insert:" }),
-    PLACEHOLDERS.map((ph) => h("button", { type: "button", class: "ph", text: ph, onclick: () => {
+    PLACEHOLDERS.map((ph) => h("button", { type: "button", class: /^\{period_/.test(ph) ? "ph ph-period" : "ph", text: ph, onclick: () => {
       const a = target.selectionStart ?? target.value.length, b = target.selectionEnd ?? a;
       target.value = target.value.slice(0, a) + ph + target.value.slice(b); target.focus(); target.selectionStart = target.selectionEnd = a + ph.length;
     } })));
@@ -287,9 +288,11 @@ async function editTask(id) {
   const currentConfig = () => (pending ? tplConfig(pending) : cfg);
   // Report Name = the template Description of the configuration the task uses (its own saved snapshot).
   const reportName = () => (pending ? tplName(pending) : (cfg && cfg.report_name) || t.description || "");
+  let periodUi = null;                              // set once the form exists (hides period-only bits for a report with no period)
   const show = () => {
     const tp = templates.find((x) => x.id === f.tpl.value);
     pending = tp && (tp.id !== t.template_id || upgrade.checked) ? tp : null;
+    if (periodUi) periodUi();
   };
   f.tpl.addEventListener("change", () => { upgrade.checked = false; show(); });
   upgrade.addEventListener("change", show);
@@ -413,16 +416,27 @@ async function editTask(id) {
     err,
     h("div", { class: "sticky-actions" }, h("span", { class: "hint", text: id ? "Changes apply to future runs." : "" }),
       h("div", { class: "actions" }, h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() }), save)));
+  const subjField = field("Subject", f.esub, "");
+  const subjHint = subjField.querySelector(".hint") || subjField.appendChild(h("span", { class: "hint" }));
   emailBody.append(
     h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el), field("BCC", rBcc.el, "Press Enter or Add; paste several addresses separated by commas or semicolons.")),
     h("div", { class: "grid-2" }, field("Delivery format", f.efmt), h("div", {})),
-    field("Subject", f.esub, "Leave empty for the standard subject (report name and period)."),
+    subjField,
     h("label", { class: "field" }, "Body", placeholderBar(f.ebody), f.ebody),
     h("div", { class: "actions" }, preview),
     h("details", { class: "subsection" }, h("summary", { text: "Failure e-mail (optional)" }),
       field("Failure subject", f.fsub), h("label", { class: "field" }, "Failure body", placeholderBar(f.fbody), f.fbody)));
   notifyBody.append(h("div", { class: "grid-2" }, field("Send the report e-mail when the run succeeds", f.nsucc),
                                              field("Send a failure e-mail when the run fails", f.nfail)), notifyHint);
+  // A report whose date rule is "none" has no reporting period, so {period_start}/{period_end} do not apply and its
+  // standard e-mail text (which contains them) would show "-" - say so instead of offering them.
+  periodUi = () => {
+    const c = currentConfig(), has = !c || c.date_rule !== "none";
+    form.querySelectorAll(".ph-period").forEach((b) => { b.hidden = !has; });
+    subjHint.textContent = has ? "Leave empty for the standard subject (report name and period)."
+      : "This report has no reporting period: write your own subject and body (for example {report_name} - {execution_date}); the standard text mentions a period.";
+  };
+  periodUi();
   syncEmail();
   mainArea().replaceChildren(form);
   save.disabled = true;                            // until the employee list has loaded (re-enabled by onLoaded, success or failure)
@@ -599,10 +613,20 @@ function editTemplate(t) {
   // read-only reporting period, recalculated whenever the date rule or the custom dates change
   const period = h("input", { readonly: true, tabindex: "-1" });
   const fromField = field("Custom from", f.from), toField = field("Custom to", f.to);
+  const datesField = field("Date fields (comma-separated)", f.dates);
+  const periodField = field("Reporting period", period, "Resolved for today (Asia/Karachi); exactly the dates entered in SAP.");
+  const patternField = field("Workbook name pattern", f.pattern, "");
+  const patternHint = patternField.querySelector(".hint") || patternField.appendChild(h("span", { class: "hint" }));
+  let patternAuto = false;                          // the pattern was switched to its period-free form by "Not applicable"
   const refresh = () => {
-    const custom = f.rule.value === "custom";
+    const none = f.rule.value === "none", custom = f.rule.value === "custom";
     fromField.style.display = toField.style.display = custom ? "" : "none";
+    // "Not applicable": the report takes no dates, so the date inputs and the reporting period are not shown at all
+    datesField.style.display = periodField.style.display = none ? "none" : "";
     period.value = periodText(f.rule.value, f.from.value, f.to.value);
+    if (none && f.pattern.value === "{ReportName}_{Period}") { f.pattern.value = "{ReportName}"; patternAuto = true; }
+    else if (!none && patternAuto && f.pattern.value === "{ReportName}") { f.pattern.value = "{ReportName}_{Period}"; patternAuto = false; }
+    patternHint.textContent = none ? "{ReportName} = Description." : "{ReportName} = Description, {Period} = reporting period.";
   };
   for (const el of [f.rule, f.from, f.to]) { el.addEventListener("change", refresh); el.addEventListener("input", refresh); }
   const err = h("div", { class: "err" });
@@ -614,7 +638,8 @@ function editTemplate(t) {
       if (f.rule.value === "custom" && (!f.from.value || !f.to.value)) throw new Error("Custom date rule needs From and To dates.");
       if (f.rule.value === "custom" && f.from.value > f.to.value) throw new Error("Custom From must not be after To.");
       const config = { ...c, tcode: f.tcode.value.trim().toUpperCase(), report_name: desc,
-        variant: f.variant.value.trim() || null, date_fields: f.dates.value.split(",").map((x) => x.trim()).filter(Boolean),
+        variant: f.variant.value.trim() || null,
+        date_fields: f.rule.value === "none" ? [] : f.dates.value.split(",").map((x) => x.trim()).filter(Boolean),
         date_rule: f.rule.value, custom_from: f.rule.value === "custom" ? f.from.value : null,
         custom_to: f.rule.value === "custom" ? f.to.value : null, output: { ...(c.output || {}), filename_pattern: f.pattern.value.trim() } };
       // Description is the single report identifier (also stored as the template's internal name).
@@ -629,8 +654,8 @@ function editTemplate(t) {
       h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() })),
     h("div", { class: "card" }, h("div", { class: "grid" }, field("Description", f.desc, "The report's name everywhere: task lists, history, e-mail subjects and workbook names."),
       field("T-Code", f.tcode), field("Variant", f.variant, "Layout and selections come from the SAP variant."),
-      field("Date fields (comma-separated)", f.dates), field("Date rule", f.rule), field("Reporting period", period, "Resolved for today (Asia/Karachi); exactly the dates entered in SAP."),
-      fromField, toField, field("Workbook name pattern", f.pattern, "{ReportName} = Description, {Period} = reporting period."), field("Status", f.status)),
+      datesField, field("Date rule", f.rule), periodField,
+      fromField, toField, patternField, field("Status", f.status)),
     h("p", { class: "hint", text: "Editing a template does not change existing tasks: each task keeps the configuration it was saved with." })), err));
   refresh();
 }

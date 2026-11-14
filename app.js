@@ -265,7 +265,7 @@ function periodRange(rule, customFrom, customTo, now = new Date()) {
 function periodText(rule, customFrom, customTo, now) {
   const r = periodRange(rule, customFrom, customTo, now);
   const f = (d) => `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}.${d.getUTCFullYear()}`;
-  return r ? `${f(r[0])} to ${f(r[1])}` : rule === "custom" ? "choose From and To" : "—";
+  return r ? `${f(r[0])} to ${f(r[1])}` : rule === "custom" ? "choose From and To" : rule === "none" ? "Not applicable" : "—";
 }
 // Same type badges as the local BAH. Live SAP tasks are executed by the LOCAL BAH on their schedule; the cloud never runs them.
 const TARGETS = { synthetic: ["Synthetic", "info"], fixture: ["Fixture", "warn"], live_sap: ["LIVE SAP", "bad"] };
