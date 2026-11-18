@@ -414,8 +414,9 @@ const VIEWS = {
                  rows, "No tasks are assigned to you yet.")];
   },
   async runs() {
-    const rows = await api("/occurrences?select=id,kind,status,due_at,attempts,max_attempts,completed_at,tasks(name,description),executions(attempt_no,status,finished_at,row_count,validation_status,error_class)&order=due_at.desc&limit=100");
+    const rows = await api("/occurrences?select=id,kind,status,due_at,attempts,max_attempts,completed_at,executor_id,tasks(name,description),executions(attempt_no,status,finished_at,row_count,validation_status,error_class)&order=due_at.desc&limit=100");
     return table([["Task", (o) => repName(o.tasks)],
+                  ["Run by", (o) => o.executor_id && o.executor_id !== me.user_id ? "Administrator (on their PC)" : "You"],
                   ["Due", (o) => fmt(o.due_at)],
                   ["Type", (o) => o.kind],
                   ["Status", (o) => badge(o.status)],
