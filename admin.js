@@ -63,10 +63,23 @@ async function upsert(table, row, onConflict) {
 }
 
 // ------------------------------------------------------------------ tasks (create / edit / assign / Run Now)
+// Obsolete / test tasks hidden from the Administrator > Tasks grid ONLY (by task id, never by text). The records,
+// their runs and their history are untouched and stay visible everywhere else.
+const HIDDEN_ADMIN_TASK_IDS = new Set([
+  "2fe2c744-a298-472f-9491-ed63886008ea",   // Stock Position: Pallets with their Shelf Life
+  "1042a219-3447-431a-aaef-fbcedbcd76ca",   // RELAY TEST - controlled (Pallets copy)
+  "fd649726-3b57-4d49-bc06-1c2d2f938653",   // Resigned Employees' Assets
+  "1b79dd0d-abba-4d20-bc41-8d3fb79a1605",   // Stock Position Pallets (cloud live test)
+  "d21f70a6-6ec3-41a4-ae8a-e3c1038e1001",   // TEST cloud runner (fixture workbook) / "End-to-end test with workbook upload..."
+  "df822662-5475-481c-b7d2-937b026982a9",   // TEST cloud runner (synthetic) / "End-to-end test - no SAP, no e-mail"
+  "7c1a6874-e0ba-45e7-8b76-98e031392ff8",   // mb51 test
+]);
+
 async function adminTasks() {
-  const [tasks, people] = await Promise.all([
+  const [allTasks, people] = await Promise.all([
     api("/tasks?select=id,name,description,execution_target,execution_mode,status,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&order=name"),
     api("/profiles?select=id,full_name,email,role,status&order=full_name")]);
+  const tasks = allTasks.filter((t) => !HIDDEN_ADMIN_TASK_IDS.has(t.id));
   const name = (id) => (people.find((p) => p.id === id) || {}).full_name || "?";
   return { actions: [h("button", { class: "primary", text: "New task", onclick: () => editTask(null) })],
     content: table([["Description", (t) => h("div", {}, h("strong", { text: t.description || t.name }), t.description && t.description !== t.name ? h("div", { class: "muted", text: `Task: ${t.name}` }) : null)],
