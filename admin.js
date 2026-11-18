@@ -68,7 +68,6 @@ async function upsert(table, row, onConflict) {
 const HIDDEN_ADMIN_TASK_IDS = new Set([
   "2fe2c744-a298-472f-9491-ed63886008ea",   // Stock Position: Pallets with their Shelf Life
   "1042a219-3447-431a-aaef-fbcedbcd76ca",   // RELAY TEST - controlled (Pallets copy)
-  "fd649726-3b57-4d49-bc06-1c2d2f938653",   // Resigned Employees' Assets
   "1b79dd0d-abba-4d20-bc41-8d3fb79a1605",   // Stock Position Pallets (cloud live test)
   "d21f70a6-6ec3-41a4-ae8a-e3c1038e1001",   // TEST cloud runner (fixture workbook) / "End-to-end test with workbook upload..."
   "df822662-5475-481c-b7d2-937b026982a9",   // TEST cloud runner (synthetic) / "End-to-end test - no SAP, no e-mail"
