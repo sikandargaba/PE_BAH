@@ -605,8 +605,14 @@ async function mailCall(action) {
 }
 
 // ------------------------------------------------------------------ report templates
+// Obsolete test templates hidden from the Report Templates grid ONLY (by template id). The records are untouched.
+const HIDDEN_ADMIN_TEMPLATE_IDS = new Set([
+  "d215e69a-6a57-48ec-a02c-ae7ca1f087ac",   // MB51 test
+]);
+
 async function adminTemplates() {
-  const rows = await api("/report_templates?select=id,name,description,version,status,config&order=name");
+  const rows = (await api("/report_templates?select=id,name,description,version,status,config&order=name"))
+    .filter((t) => !HIDDEN_ADMIN_TEMPLATE_IDS.has(t.id));
   rows.sort((a, b) => tplName(a).localeCompare(tplName(b)));
   return { actions: [h("button", { class: "primary", text: "New template", onclick: () => editTemplate(null) })],
     content: table([["Description", (t) => h("strong", { text: tplName(t) })],
