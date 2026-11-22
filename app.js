@@ -117,7 +117,9 @@ async function start() {
   me = await api("/rpc/caller_context", { method: "POST", body: "{}" });
   const prof = (await api(`/profiles?select=full_name,email,role&id=eq.${me.user_id}`))[0];
   if (!prof || me.status !== "active") { signOutLocal(); renderLogin("Account not active for BAH."); return; }
-  me.full_name = prof.full_name;
+  me.full_name = prof.full_name; me.email = prof.email;
+  const reg = await pendingRegistration();                    // invited accounts: name + usage policy first
+  if (reg) { renderRegistration(reg); return; }
   tab = me.is_admin ? "admin_dashboard" : "dashboard";        // land on the dashboard for the user's role
   render();
 }
@@ -126,9 +128,11 @@ async function start() {
 // [key, label, subtitle] - a string entry is a section heading.
 const TABS = ["My work", ["dashboard", "My Dashboard", "Your tasks, recent runs and report e-mails at a glance."],
   ["tasks", "My Tasks", "Your report tasks, schedules and next runs."],
-  ["runs", "Execution History", "Every run of your tasks."], ["reports", "Reports", "Validated workbooks available to download."],
+  ["runs", "My Jobs", "Every run of your tasks: queued, running, completed and failed."], ["reports", "Reports", "Validated workbooks available to download."],
   ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH for your tasks."],
-  "Account", ["runner", "BAH Runner", "Download, install and update the BAH Runner on your PC."]];
+  "Account", ["sap_credentials", "My SAP Credentials", "Save, test, replace or remove the SAP password BAH uses for your reports."],
+  ["profile", "My Profile", "Your account details and BAH password."],
+  ["runner", "BAH Runner", "Download, install and update the BAH Runner on your PC."]];
 
 // ------------------------------------------------------------------ icons (Lucide-style line icons, static markup)
 const ICONS = {
@@ -147,12 +151,29 @@ const ICONS = {
   chevron: '<path d="m6 9 6 6 6-6"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
   cloud: '<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>',
+  key: '<path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/>',
+  user: '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  invite: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/>',
+  server: '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/>',
+  activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+  shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
 };
-const NAV_ICON = { admin_dashboard: "dashboard", dashboard: "dashboard", admin_templates: "templates", admin_tasks: "tasks", tasks: "tasks",
+const NAV_ICON = { sap_credentials: "key", profile: "user", admin_invitations: "invite", admin_credentials: "key", admin_vms: "server",
+  admin_runners: "activity", admin_system: "clock", admin_audit: "shield", admin_dashboard: "dashboard", dashboard: "dashboard", admin_templates: "templates", admin_tasks: "tasks", tasks: "tasks",
   admin_people: "users", runner: "runner", admin_runs: "history", runs: "history", reports: "reports", notifications: "mail",
   admin_releases: "releases", admin_settings: "settings" };
+// Trusted Types (CSP require-trusted-types-for 'script'): the ONLY markup this portal ever parses is one of the
+// static icons above. The policy refuses everything else, so no other code - ours or injected - can write HTML.
+const ICON_MARKUP = new Map(Object.entries(ICONS).map(([k, v]) =>
+  [k, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="i" aria-hidden="true">${v}</svg>`]));
+const ICON_ALLOWED = new Set(ICON_MARKUP.values());
+const ICON_POLICY = window.trustedTypes && trustedTypes.createPolicy
+  ? trustedTypes.createPolicy("bah-icons", { createHTML: (s) => { if (!ICON_ALLOWED.has(s)) throw new TypeError("markup refused"); return s; } })
+  : { createHTML: (s) => { if (!ICON_ALLOWED.has(s)) throw new TypeError("markup refused"); return s; } };
 function icon(name) {
-  const doc = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="i" aria-hidden="true">${ICONS[name] || ""}</svg>`, "image/svg+xml");
+  const markup = ICON_MARKUP.get(name) || ICON_MARKUP.get("dashboard");
+  const doc = new DOMParser().parseFromString(ICON_POLICY.createHTML(markup), "image/svg+xml");
   return document.importNode(doc.documentElement, true);
 }
 const initials = (n) => String(n || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((x) => x[0].toUpperCase()).join("") || "?";
@@ -188,6 +209,8 @@ function layout(nav) {
   // header: breadcrumb, environment, notifications, profile menu
   const menu = h("div", { class: "menu", hidden: true },
     h("div", { class: "menu-head" }, h("strong", { text: me.full_name }), h("small", { text: ROLE_LABEL() })),
+    h("button", { type: "button", class: "menu-item", onclick: () => go("profile") }, icon("user"), "My Profile"),
+    h("button", { type: "button", class: "menu-item", onclick: () => go("sap_credentials") }, icon("key"), "My SAP Credentials"),
     h("button", { type: "button", class: "menu-item", onclick: () => go("runner") }, icon("runner"), "BAH Runner"),
     h("button", { type: "button", class: "menu-item danger", onclick: signOut }, icon("logout"), "Sign out"));
   const profileBtn = h("button", { type: "button", class: "profile-btn", "aria-haspopup": "menu", onclick: (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; } },
@@ -220,7 +243,7 @@ async function render() {
   try {
     const out = await view();
     const paged = !Array.isArray(out);
-    body.replaceChildren(pageHead(title, sub, ...(paged ? out.actions || [] : [])), ...(paged ? out.content : out));
+    body.replaceChildren(pageHead(title, sub, ...(paged ? out.actions || [] : [])), ...(paged ? out.content : out).filter(Boolean));
   } catch (x) { body.replaceChildren(pageHead(title, sub), h("div", { class: "notice warn", text: x.message })); }
 }
 
@@ -317,20 +340,44 @@ async function taskDetail(t) {
 // Employee dashboard (same card/KPI layout as the admin dashboard; RLS limits every query to the user's own rows).
 async function employeeDashboard() {
   const since = new Date(Date.now() - 7 * 86400000).toISOString();
-  const [tasks, occ, mails, runners, latestRows] = await Promise.all([
-    api("/tasks?select=id,status"), api(`/occurrences?select=status,kind,due_at,tasks(name,description)&due_at=gte.${since}&order=due_at.desc&limit=200`),
+  const [tasks, occ, mails, runners, latestRows, creds] = await Promise.all([
+    api("/tasks?select=id,status"), api(`/occurrences?select=status,kind,due_at,tasks(name,description),executions(attempt_no,error_class,error_detail)&due_at=gte.${since}&order=due_at.desc&limit=200`),
     api(`/notifications?select=status&created_at=gte.${since}`),
     api(`/runners?select=name,version,last_seen_at&status=eq.active&employee_id=eq.${me.user_id}`),
-    api("/rpc/release_latest_stable", { method: "POST", body: "{}" }).catch(() => [])]);
+    api("/rpc/release_latest_stable", { method: "POST", body: "{}" }).catch(() => []),
+    myCredentialRows().catch(() => null)]);
   const n = (rows, f) => rows.filter(f).length;
   const kpi = (label, value, cls = "") => h("div", { class: `kpi ${cls}` }, h("div", { class: "label", text: label }), h("div", { class: "value", text: String(value) }));
   const group = (title, ...k) => h("div", { class: "card" }, h("h2", { text: title }), h("div", { class: "kpis" }, ...k));
   const r = runners[0] || null, [state, cls] = runnerState(r && r.version, (latestRows || [])[0] || null);
+  const shared = sharedRunnerInUse(creds);
+  const go = (k) => { tab = k; render(); };
+  // SAP credential: status only (the password itself is never returned)
+  const cred = creds && creds.find((c) => c.sap_user_id) || (creds || [])[0] || null;
+  const credCard = creds === null ? null : h("div", { class: "card" }, h("h2", { text: "My SAP credentials" }),
+    cred ? h("dl", { class: "dl" },
+      h("dt", { text: "SAP user ID" }), h("dd", { class: "mono", text: cred.sap_user_id || "not registered" }),
+      h("dt", { text: "SAP password" }), h("dd", {}, credBadge(cred.credential_status)),
+      h("dt", { text: "Connection test" }), h("dd", {}, cred.test_pending ? badge("pending")
+        : testBadge(cred.credential_status === "configured" ? cred.last_test_result : null),
+        cred.credential_status === "configured" && cred.last_test_at ? ` ${fmt(cred.last_test_at)}` : ""))
+      : h("div", { class: "empty", text: "No SAP connection is set up yet." }),
+    h("div", { class: "actions" }, h("button", { class: cred && cred.credential_status === "configured" ? "secondary" : "primary",
+      text: cred && cred.credential_status === "configured" ? "Manage SAP credentials" : "Save my SAP password", onclick: () => go("sap_credentials") })));
+  const failures = occ.filter((o) => o.status === "failed").slice(0, 5);
+  const lastError = (o) => { const e = (o.executions || []).sort((a, b) => b.attempt_no - a.attempt_no)[0];
+    return e && e.error_class ? `${e.error_class}${e.error_detail ? " - " + e.error_detail : ""}` : "—"; };
   return [
+    h("div", { class: "card" }, h("h2", { text: `Welcome, ${me.full_name}` }), h("div", { class: "muted", text: me.email || "" })),
     h("div", { class: "grid2" },
       group("My tasks", kpi("Assigned tasks", tasks.length), kpi("Active", n(tasks, (t) => t.status === "active"), "ok")),
-      group("My runner", kpi("Runner", r ? r.name : "not set up", r ? "ok" : "warn"), kpi("Version", r ? String(r.version || "—").replace(/^cloud-/, "") : "—", cls),
+      shared ? group("Where my reports run", kpi("Runner", "shared BAH runner", "ok"), kpi("Your PC", "not needed"))
+        : !r && creds !== null ? group("Where my reports run", kpi("Runner", "shared BAH runner"), kpi("Status", "save your SAP password", "warn"))
+        : group("My runner", kpi("Runner", r ? r.name : "not set up", r ? "ok" : "warn"), kpi("Version", r ? String(r.version || "—").replace(/^cloud-/, "") : "—", cls),
         kpi("Status", r ? state : "see BAH Runner", cls))),
+    credCard,
+    failures.length ? h("div", { class: "card" }, h("h2", { text: "Recent failures" }),
+      ...table([["Task", (o) => repName(o.tasks)], ["Due", (o) => fmt(o.due_at)], ["Reason", (o) => lastError(o)]], failures, "")) : null,
     h("div", { class: "grid2" },
       group("Runs - last 7 days", kpi("Success", n(occ, (o) => o.status === "succeeded"), "ok"), kpi("Failed", n(occ, (o) => o.status === "failed"), "bad"),
         kpi("Queued", n(occ, (o) => ["pending", "waiting_retry", "claimed"].includes(o.status)), "warn")),
@@ -349,29 +396,33 @@ function runNowCell(t, ctx, openRun) {
   const details = h("button", { class: "secondary small", text: "Details", onclick: () => taskDetail(t) });
   const manual = t.status === "active" && t.execution_mode !== "scheduled_only";
   const btn = manual ? h("button", { class: "small", text: "Run Now", disabled: !!openRun, onclick: () => runNowSelf(t, ctx, btn, status) }) : null;
-  if (openRun) watchRun(openRun.id, btn, status);
+  if (openRun) watchRun(openRun.id, btn, status, ctx.shared);
   return h("div", {}, h("div", { class: "actions" }, details, btn), status);
 }
 
 async function runNowSelf(t, ctx, btn, status) {
   const live = t.execution_target === "live_sap";
   const say = (cls, text) => { status.className = cls; status.textContent = text; };
-  if (!ctx.runner) return say("error", "No BAH Runner is registered for you - install it from BAH Runner first.");
-  if (!ctx.online) return say("error", "Your BAH Runner is offline. Start it with Start BAH Runner on your PC, then try again.");
-  if (live && !ctx.runner.live_permitted) return say("error", "Your BAH Runner was not started for live SAP. Restart it with Start BAH Runner, then try again.");
-  if (live && !confirm(`LIVE SAP Run Now for "${t.name}".\n\nThe report runs on your own PC with your SAP user; keep Start BAH Runner open and be present for the SAP login.\n\nStart the live run now?`)) return;
+  if (!ctx.shared) {               // personal runner on the employee's PC (the shared runner is checked by the database)
+    if (!ctx.runner) return say("error", "No BAH Runner is registered for you - install it from BAH Runner first.");
+    if (!ctx.online) return say("error", "Your BAH Runner is offline. Start it with Start BAH Runner on your PC, then try again.");
+    if (live && !ctx.runner.live_permitted) return say("error", "Your BAH Runner was not started for live SAP. Restart it with Start BAH Runner, then try again.");
+  }
+  const where = ctx.shared ? "on the shared BAH runner with your SAP user and the SAP password saved under My SAP Credentials"
+    : "on your own PC with your SAP user; keep Start BAH Runner open and be present for the SAP login";
+  if (live && !confirm(`LIVE SAP Run Now for "${t.name}".\n\nThe report runs ${where}.\n\nStart the live run now?`)) return;
   if (!live && !confirm(`Run "${t.name}" now?`)) return;
   btn.disabled = true; say("hint", "Starting…");
   try {
     const rows = await api("/rpc/employee_run_now", { method: "POST", body: JSON.stringify({ p_task: t.id, p_request_key: uid(), p_confirm_live: live }) });
     const occ = (rows || [])[0];
     if (!occ || !occ.occurrence_id) throw new Error("the run could not be queued");
-    watchRun(occ.occurrence_id, btn, status);
+    watchRun(occ.occurrence_id, btn, status, ctx.shared);
   } catch (x) { say("error", `Not started: ${x.message}`); btn.disabled = false; }
 }
 
 // Live status of one run: queued -> running -> completed / failed (polls every 5 s for up to 45 minutes).
-function watchRun(occurrenceId, btn, status) {
+function watchRun(occurrenceId, btn, status, shared = false) {
   const say = (cls, text) => { status.className = cls; status.textContent = text; };
   const t0 = Date.now();
   const tick = async () => {
@@ -381,8 +432,8 @@ function watchRun(occurrenceId, btn, status) {
     catch { setTimeout(tick, 10000); return; }
     const e = ((o && o.executions) || []).sort((a, b) => b.attempt_no - a.attempt_no)[0];
     const s = o ? o.status : "pending";
-    if (s === "pending" || s === "waiting_retry") say("hint", "Queued - waiting for your BAH Runner to pick it up…");
-    else if (s === "claimed") say("hint", "Running on your PC - keep Start BAH Runner open…");
+    if (s === "pending" || s === "waiting_retry") say("hint", shared ? "Queued - waiting for the shared BAH runner…" : "Queued - waiting for your BAH Runner to pick it up…");
+    else if (s === "claimed") say("hint", shared ? "Running on the shared BAH runner…" : "Running on your PC - keep Start BAH Runner open…");
     else if (s === "succeeded") { say("hint ok-text", `Completed${e && e.row_count != null ? ` - ${e.row_count} rows` : ""}. See Execution History and Reports.`); if (btn) btn.disabled = false; return; }
     else if (s === "failed") { say("error", `Failed${e && e.error_class ? `: ${e.error_class}${e.error_detail ? " - " + e.error_detail : ""}` : ""}. No automatic retry.`); if (btn) btn.disabled = false; return; }
     else if (s === "cancelled") { say("error", "Cancelled."); if (btn) btn.disabled = false; return; }
@@ -393,16 +444,19 @@ function watchRun(occurrenceId, btn, status) {
 }
 
 const VIEWS = {
+  ...ACCOUNT_VIEWS,
   dashboard: employeeDashboard,
   runner: runnerPage,
   async tasks() {
-    const [rows, runners, open] = await Promise.all([
+    const [rows, runners, open, creds] = await Promise.all([
       api("/tasks?select=id,name,description,execution_target,execution_mode,status,schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status)&order=name"),
       api(`/runners?select=name,last_seen_at,live_permitted&status=eq.active&employee_id=eq.${me.user_id}`),
-      api(`/occurrences?select=id,task_id,status&employee_id=eq.${me.user_id}&status=in.(pending,claimed,waiting_retry)&order=created_at.desc`)]);
+      api(`/occurrences?select=id,task_id,status&employee_id=eq.${me.user_id}&status=in.(pending,claimed,waiting_retry)&order=created_at.desc`),
+      myCredentialRows().catch(() => null)]);
     const runner = runners[0] || null;
-    const ctx = { runner, online: !!runner && Date.now() - new Date(runner.last_seen_at).getTime() < 10 * 60000 };
-    const runnerNote = !runner ? h("div", { class: "notice warn", text: "No BAH Runner is registered for you yet - see BAH Runner to install it. Run Now needs it." })
+    const ctx = { runner, online: !!runner && Date.now() - new Date(runner.last_seen_at).getTime() < 10 * 60000, shared: sharedRunnerInUse(creds) };
+    const runnerNote = ctx.shared ? h("div", { class: "notice", text: "Your SAP reports run on the shared BAH runner with the SAP password saved under My SAP Credentials - your PC does not need to be on." })
+      : !runner ? h("div", { class: "notice warn", text: creds ? "No SAP password is saved for you yet - save it under My SAP Credentials so BAH can run your SAP reports." : "No BAH Runner is registered for you yet - see BAH Runner to install it. Run Now needs it." })
       : ctx.online ? h("div", { class: "notice", text: `Your BAH Runner ${runner.name} is online${runner.live_permitted ? " and allowed to run live SAP reports" : ""}.` })
       : h("div", { class: "notice warn", text: `Your BAH Runner ${runner.name} is offline (last seen ${fmt(runner.last_seen_at)}). Start it with Start BAH Runner to use Run Now.` });
     return [runnerNote, ...table([["Report", (t) => h("div", {}, h("strong", { text: t.description || t.name }), t.description && t.description !== t.name ? h("div", { class: "muted", text: `Task: ${t.name}` }) : null)],
@@ -519,6 +573,13 @@ async function download(id, btn) {
 
 // ------------------------------------------------------------------ boot
 (function boot() {
+  // Never run inside a frame (clickjacking of sign-in / SAP password pages). Netlify also sends frame-ancestors 'none';
+  // this covers hosts that cannot send headers (GitHub Pages).
+  if (window.top !== window.self) {
+    app.replaceChildren(h("div", { class: "auth" }, h("div", { class: "panel" }, h("h1", { text: "BAH must be opened directly" }),
+      h("p", { text: "For your security this page does not work inside another site. Open the BAH portal in its own browser tab." }))));
+    return;
+  }
   const frag = new URLSearchParams(location.hash.slice(1));
   if (frag.get("access_token") && (frag.get("type") === "recovery" || frag.get("type") === "invite")) {
     const t = frag.get("access_token");

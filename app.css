@@ -186,6 +186,12 @@ input:hover, select:hover, textarea:hover { border-color: #b9c3d0; }
 input:focus, select:focus, textarea:focus { outline: 0; border-color: var(--teal-500); box-shadow: 0 0 0 3px rgba(20, 148, 159, .16); }
 .fieldset { border: 1px solid var(--border); border-radius: var(--r); padding: var(--s3) var(--s4); background: var(--surface-2); }
 
+/* ------------------------------------------------------------------ own account: registration, SAP credentials, profile */
+ul.policy { margin: 6px 0 0; padding-left: 18px; font-weight: 400; color: var(--text-2); font-size: var(--fs-sm); max-height: 240px; overflow: auto; }
+ul.policy li { margin-bottom: 4px; }
+.card form.cred, .card form.own { display: flex; flex-direction: column; gap: var(--s3); max-width: 440px; margin-top: var(--s4); }
+.card .actions + form.cred, .card .notice + .actions, .card .hint + .actions, .card .dl + .actions { margin-top: var(--s4); }
+.card .notice { margin-top: var(--s3); }
 /* ------------------------------------------------------------------ task / long forms */
 .task-form { max-width: 1040px; }
 .form-card { padding: var(--s6); }

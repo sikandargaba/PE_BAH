@@ -769,11 +769,19 @@ function uploadRelease() {
 const ADMIN_TABS = ["Overview", ["admin_dashboard", "Dashboard", "Operational overview - cloud BAH."],
   "Automation", ["admin_templates", "Report Templates", "Reusable report definitions. Editing creates a new version; existing tasks keep their copy."],
   ["admin_tasks", "Tasks", "Report tasks, schedules and employee assignments."],
-  "People & execution", ["admin_people", "Employees", "Accounts, SAP user IDs and each employee's runner."],
+  "People & access", ["admin_people", "Employees", "Accounts, invitations, registration, SAP user IDs and each employee's runner."],
+  ["admin_invitations", "Invitations", "Pending, registered, expired and revoked invitations."],
+  ["admin_credentials", "SAP Credentials", "Which employees have a usable SAP password saved for the shared runner (status only)."],
+  "Execution", ["admin_vms", "VM Management", "The VM that hosts the shared BAH runner: address, runner, sealing key and health."],
+  ["admin_runners", "Runner Monitoring", "Every BAH runner: heartbeat, version, mode and recent jobs."],
   ["runner", "BAH Runner", "Download, install and update the BAH Runner on your PC."],
   "Monitoring", ["admin_runs", "Execution History", "Every run, including report runs handed over by the local BAH."],
   ["reports", "Reports", "Validated workbooks stored in the cloud."], ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH."],
+  ["admin_system", "System Jobs", "Scheduled database jobs and the health of every BAH queue."],
+  ["admin_audit", "Audit Logs", "Who did what and when - read-only."],
   "System", ["admin_releases", "Runner Releases", "Generic BAH Runner packages: upload, verify, release, retire; installed versions."],
-  ["admin_settings", "Settings", "Live SAP authorisation and cloud e-mail sending."]];
+  ["admin_settings", "Settings", "Live SAP authorisation and cloud e-mail sending."],
+  "My account", ["sap_credentials", "My SAP Credentials", "Save, test, replace or remove the SAP password BAH uses for your reports."],
+  ["profile", "My Profile", "Your account details and BAH password."]];
 const ADMIN_VIEWS = { admin_dashboard: adminDashboard, admin_tasks: adminTasks, admin_templates: adminTemplates, admin_people: adminPeople,
                       admin_settings: adminSettings, admin_runs: adminRuns, admin_releases: adminReleases };
