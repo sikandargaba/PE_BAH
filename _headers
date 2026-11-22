@@ -1,7 +1,9 @@
 # Netlify response headers for the BAH portal (GitHub Pages ignores this file; the <meta> CSP in index.html and the
 # portal's frame guard cover that host). frame-ancestors and the other headers below can only be sent as headers.
+# script-src lists the portal's five script files by exact path (query strings such as ?v= are ignored by CSP), so
+# nothing else served from this origin can run - including the badge script Netlify injects into index.html.
 /*
-  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://tffiatipkehzizaciigv.supabase.co; font-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types bah-icons; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'none'; script-src https://bah-portal.netlify.app/admin.js https://bah-portal.netlify.app/seal.js https://bah-portal.netlify.app/account.js https://bah-portal.netlify.app/admin_ops.js https://bah-portal.netlify.app/app.js; style-src 'self'; img-src 'self' data:; connect-src https://tffiatipkehzizaciigv.supabase.co; font-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types bah-icons; frame-ancestors 'none'
   X-Frame-Options: DENY
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
