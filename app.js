@@ -113,6 +113,55 @@ function renderSetPassword(accessToken) {
   authPanel("Set your BAH password", form);
 }
 
+// Click-to-confirm setup link (#bah_setup=<token hash>, from admin-setup-link / admin-create-user). Opening the
+// page spends nothing - link previews and scanners only load this static page. The one-time token is sent to
+// Supabase Auth (POST /verify, token_hash) only when the employee saves a new password. It lives only in this
+// closure: removed from the address bar at once, never stored, logged or sent anywhere else.
+const PW_RULE = (p) => p.length >= 12 && /[A-Za-z]/.test(p) && /[0-9]/.test(p);
+function renderSafeSetup(tokenHash) {
+  let pending = tokenHash;                           // spent (cleared) on the first verification attempt
+  let accessToken = null;                            // short-lived session from the verification, memory only
+  const p1 = h("input", { type: "password", autocomplete: "new-password", minlength: "12", required: true });
+  const p2 = h("input", { type: "password", autocomplete: "new-password", minlength: "12", required: true });
+  const err = h("div", { class: "error" });
+  const btn = h("button", { class: "primary", text: "Save password" });
+  const form = h("form", { onsubmit: async (e) => {
+    e.preventDefault(); err.textContent = "";
+    if (p1.value !== p2.value) { err.textContent = "Passwords differ."; return; }
+    if (!PW_RULE(p1.value)) { err.textContent = "At least 12 characters with letters and digits."; return; }
+    btn.disabled = true;
+    try {
+      if (!accessToken) {
+        if (!pending) throw Object.assign(new Error(), { final: true });
+        const v = await fetch(`${AUTH}/verify`, { method: "POST", headers: { apikey: KEY, "content-type": "application/json" },
+                                                  body: JSON.stringify({ type: "recovery", token_hash: pending }) });
+        pending = null;                              // one attempt only; a new link is needed after a failure
+        const j = await v.json().catch(() => ({}));
+        if (!v.ok || !j.access_token) throw Object.assign(new Error(), { final: true });
+        accessToken = j.access_token;
+      }
+      const r = await fetch(`${AUTH}/user`, { method: "PUT", headers: { apikey: KEY, authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+                                             body: JSON.stringify({ password: p1.value }) });
+      if (!r.ok) {                                   // e.g. password refused by the server policy: retry, link already used
+        const j = await r.json().catch(() => ({}));
+        err.textContent = `The password was refused${j.msg || j.message ? ` (${j.msg || j.message})` : ""}. Choose another one and save again.`;
+        return;
+      }
+      p1.value = p2.value = "";
+      await fetch(`${AUTH}/logout`, { method: "POST", headers: { apikey: KEY, authorization: `Bearer ${accessToken}` } }).catch(() => {});
+      accessToken = null;
+      renderLogin("Password set. Sign in with your official e-mail and the new password.");
+    } catch (x) {
+      p1.value = p2.value = "";
+      if (x && x.final) { renderLogin("This setup link is invalid, has expired or was already used. Ask the BAH administrator for a new one."); return; }
+      err.textContent = "Could not reach BAH. Check the connection and press Save password again.";
+    } finally { btn.disabled = false; }
+  } }, h("p", { class: "hint", text: "Choose your BAH password. The link works once: it is used when you press Save password." }),
+     h("label", { class: "field" }, "New password (min. 12, letters and digits)", p1),
+     h("label", { class: "field" }, "Repeat", p2), btn, err);
+  authPanel("Set your BAH password", form);
+}
+
 async function start() {
   me = await api("/rpc/caller_context", { method: "POST", body: "{}" });
   const prof = (await api(`/profiles?select=full_name,email,role&id=eq.${me.user_id}`))[0];
@@ -581,6 +630,13 @@ async function download(id, btn) {
     return;
   }
   const frag = new URLSearchParams(location.hash.slice(1));
+  const setupToken = frag.get("bah_setup");
+  if (setupToken !== null) {
+    history.replaceState(null, "", location.pathname);   // remove the one-time token from the address bar and history
+    if (/^[A-Za-z0-9_-]{20,200}$/.test(setupToken)) renderSafeSetup(setupToken);
+    else renderLogin("This setup link is incomplete. Copy the whole link again, or ask the BAH administrator for a new one.");
+    return;
+  }
   if (frag.get("access_token") && (frag.get("type") === "recovery" || frag.get("type") === "invite")) {
     const t = frag.get("access_token");
     history.replaceState(null, "", location.pathname);   // remove the one-time token from the address bar
