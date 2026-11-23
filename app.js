@@ -490,8 +490,8 @@ const VIEWS = {
   },
   async notifications() {
     const rows = await api("/notifications?select=kind,status,created_at,sent_at,delivery_status,error_class,tasks(name,description)&order=created_at.desc&limit=100");
-    return table([["Task", (n) => repName(n.tasks)],
-                  ["Type", (n) => n.kind === "success" ? "Report e-mail" : "Failure notice"],
+    return table([["Task", (n) => n.kind === "test" ? "—" : repName(n.tasks)],
+                  ["Type", (n) => n.kind === "success" ? "Report e-mail" : n.kind === "test" ? "Test e-mail" : "Failure notice"],
                   ["Queued", (n) => fmt(n.created_at)],
                   ["E-mail", (n) => h("div", {}, badge(n.status === "sent" ? "accepted by mail server" : n.status),
                                       n.error_class ? h("div", { class: "muted", text: n.error_class }) : null)],

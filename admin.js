@@ -579,9 +579,9 @@ async function adminSettings() {
     h("div", { class: "card" }, h("h2", { text: "Cloud e-mail" }),
     h("p", {}, "Cloud e-mail sending is ", badge(mailOn ? "enabled" : "not enabled"),
       `. SMTP: ${get("smtp").host || "—"}:${get("smtp").port || ""} as ${get("smtp").username || "—"} (password held only as a server secret). ` +
-      "E-mails are queued for every finished run with e-mail on (including report runs handed over by the local BAH); while sending is enabled the central sender delivers them every minute."),
+      "E-mails are queued for every finished run with e-mail on (including report runs handed over by the local BAH); while sending is enabled the GitHub mail relay is started as soon as one is due (hourly as a fallback)."),
     h("div", { class: "actions" },
-      h("button", { class: "secondary", text: "Test SMTP connection (sends nothing)", onclick: async (e) => {
+      h("button", { class: "secondary", text: "Check e-mail set-up (sends nothing)", onclick: async (e) => {
         e.target.disabled = true;
         try { const r = await mailCall("test"); alert(`${r.ok ? "OK" : "Failed"}: ${r.message}`); }
         catch (x) { alert(x.message); } finally { e.target.disabled = false; } } }),
@@ -593,7 +593,15 @@ async function adminSettings() {
       mailOn ? h("button", { class: "secondary", text: "Send queued e-mails now", onclick: async (e) => {
         e.target.disabled = true;
         try { const r = await mailCall("send-now"); alert(r.reason ? r.reason : `Processed ${r.processed} e-mail(s).`); render(); }
-        catch (x) { alert(x.message); } finally { e.target.disabled = false; } } }) : null))];
+        catch (x) { alert(x.message); } finally { e.target.disabled = false; } } }) : null,
+      // fixed test text to the signed-in administrator's own registered address only (enforced by the database)
+      mailOn ? h("button", { class: "secondary", text: "Send test e-mail to me", onclick: async (e) => {
+        if (!confirm(`Send a short test e-mail (no report data) to your own address, ${me.email || "your registered address"}?`)) return;
+        e.target.disabled = true;
+        try {
+          const r = await api("/rpc/admin_queue_test_email", { method: "POST", body: "{}" });
+          alert(`Test e-mail queued for ${r.to}. It is sent within a few minutes; see E-mail Notifications for the result.`);
+        } catch (x) { alert(x.message); } finally { e.target.disabled = false; } } }) : null))];
 }
 
 async function mailCall(action) {
