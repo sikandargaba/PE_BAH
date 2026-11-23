@@ -43,8 +43,8 @@ function inviteEmployeeForm() {
           h("div", { class: "actions" }, h("button", { type: "button", class: "secondary", text: "Copy link", onclick: async (ev) => {
             try { await navigator.clipboard.writeText(link.value); ev.target.textContent = "Copied"; } catch { link.select(); } } }),
             h("button", { type: "button", class: "secondary", text: "Done (hide link)", onclick: () => { link.value = ""; out.replaceChildren(); render(); } })),
-          h("p", { class: "hint", text: "Prefer e-mail? After 2 minutes use Resend e-mail under Invitations (a new link replaces this one)." }));
-      } else out.append(h("p", { class: "hint", text: "No link was generated - use Resend e-mail under Invitations." }));
+          h("p", { class: "hint", text: "Lost it? Use Create setup link in the Employees table or New setup link under Invitations (a new link replaces this one)." }));
+      } else out.append(h("p", { class: "hint", text: "No link was generated - use New setup link under Invitations." }));
     } catch (x) { out.append(h("div", { class: "error", text: `Not created: ${x.message}` })); }
     finally { btn.disabled = false; }
   } }, field("Full name", name), field("Official e-mail", email), field("Employee code", code), btn,
@@ -124,7 +124,7 @@ async function adminInvitations() {
   return [
     h("div", { class: "card" }, h("h2", { text: "Invitations" }), h("div", { class: "kpis" },
       kpiBox("Pending", n("pending"), "warn"), kpiBox("Registered", n("accepted"), "ok"), kpiBox("Expired", n("expired"), "bad"), kpiBox("Revoked", n("revoked")))),
-    h("div", { class: "notice", text: "Create accounts under Employees → Invite employee. Resend e-mail sends a new one-time setup link to the registered address and extends the invitation by 7 days." }),
+    h("div", { class: "notice", text: "Create accounts under Employees → Invite employee. New setup link creates a new one-time link for you to hand over personally (no e-mail is sent) and extends the invitation by 7 days." }),
     ...table([
       ["Person", (v) => h("div", {}, h("strong", { text: v.full_name }), h("div", { class: "muted", text: v.email }))],
       ["Status", (v) => h("span", { class: `badge ${v.status === "accepted" ? "ok" : v.status === "pending" ? "info" : "bad"}`, text: INVITE_BADGE[v.status] || v.status })],
@@ -134,17 +134,21 @@ async function adminInvitations() {
       ["", (v) => {
         if (v.status === "accepted" || v.status === "revoked") return null;
         const msg = h("div", { class: "hint" });
-        const resend = h("button", { class: "secondary small", text: "Resend e-mail", onclick: async () => {
-          if (!confirm(`E-mail a new setup link to ${v.full_name} (${v.email})?\n\nAny earlier link stops working; the invitation is extended by 7 days.`)) return;
-          resend.disabled = true; msg.className = "hint"; msg.textContent = "Sending…";
-          try { await fnPost("admin-setup-link", { user_id: v.user_id, kind: "setup", deliver: "email" }); msg.className = "hint ok-text"; msg.textContent = "Sent."; setTimeout(render, 1500); }
-          catch (x) { msg.className = "error"; msg.textContent = x.message; resend.disabled = false; }
+        const slot = h("div", {});
+        // no cloud e-mail: a new one-time link is shown here for the admin to hand over (see setupLinkPanel in admin.js)
+        const resend = h("button", { class: "secondary small", text: "New setup link", onclick: async () => {
+          if (!confirm(`Create a new one-time setup link for ${v.full_name} (${v.email})?\n\n` +
+                       "No e-mail is sent: you hand the link over personally. Any earlier link stops working; the invitation is extended by 7 days.")) return;
+          resend.disabled = true; msg.className = "hint"; msg.textContent = "Creating…"; slot.replaceChildren();
+          try { const link = await createSetupLink(v.user_id, "setup"); msg.textContent = ""; slot.replaceChildren(setupLinkPanel(link, v.full_name, () => render())); }
+          catch (x) { msg.className = "error"; msg.textContent = `No link created: ${x.message}`; }
+          finally { resend.disabled = false; }
         } });
         const revoke = v.status === "pending" ? h("button", { class: "secondary small danger", text: "Revoke", onclick: async () => {
           if (!confirm(`Revoke the invitation for ${v.full_name}?\n\nThe account is deactivated, so the link and any password set with it stop working.`)) return;
           try { await rpc("admin_revoke_invitation", { p_invitation: v.id }); render(); } catch (x) { msg.className = "error"; msg.textContent = x.message; }
         } }) : null;
-        return h("div", {}, h("div", { class: "actions" }, resend, revoke), msg);
+        return h("div", {}, h("div", { class: "actions" }, resend, revoke), msg, slot);
       }]], rows, "No invitations yet.")];
 }
 

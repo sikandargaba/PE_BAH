@@ -288,3 +288,6 @@ details.subsection label.field { margin-bottom: var(--s3); }
   .form-card { padding: var(--s4); }
   main { padding: var(--s4); }
 }
+/* one-time setup link handed over by an admin (Employees / Invitations) */
+.notice.setup-link { flex-direction: column; align-items: stretch; margin-top: var(--s2); }
+.notice.setup-link input { width: 100%; }
