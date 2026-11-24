@@ -76,9 +76,10 @@ const HIDDEN_ADMIN_TASK_IDS = new Set([
 
 async function adminTasks() {
   const [allTasks, people] = await Promise.all([
-    api("/tasks?select=id,name,description,execution_target,execution_mode,status,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&order=name"),
+    api("/tasks?select=id,name,description,execution_target,execution_mode,status,report_kind,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&order=name"),
     api("/profiles?select=id,full_name,email,role,status&order=full_name")]);
-  const tasks = allTasks.filter((t) => !HIDDEN_ADMIN_TASK_IDS.has(t.id));
+  // dynamic (multi-source) reports have their own section (Dynamic Reports) and are not listed here
+  const tasks = allTasks.filter((t) => !HIDDEN_ADMIN_TASK_IDS.has(t.id) && t.report_kind !== "dynamic");
   const name = (id) => (people.find((p) => p.id === id) || {}).full_name || "?";
   return { actions: [h("button", { class: "primary", text: "New task", onclick: () => editTask(null) })],
     content: table([["Description", (t) => h("div", {}, h("strong", { text: t.description || t.name }), t.description && t.description !== t.name ? h("div", { class: "muted", text: `Task: ${t.name}` }) : null)],
@@ -862,6 +863,7 @@ function uploadRelease() {
 const ADMIN_TABS = ["Overview", ["admin_dashboard", "Dashboard", "Operational overview - cloud BAH."],
   "Automation", ["admin_templates", "Report Templates", "Reusable report definitions. Editing creates a new version; existing tasks keep their copy."],
   ["admin_tasks", "Tasks", "Report tasks, schedules and employee assignments."],
+  ["admin_dynamic", "Dynamic Reports", "Reports built from several SAP reports, matched and transformed on the shared BAH runner."],
   "People & access", ["admin_people", "Employees", "Accounts, invitations, registration, SAP user IDs and each employee's runner."],
   ["admin_invitations", "Invitations", "Pending, registered, expired and revoked invitations."],
   ["admin_credentials", "SAP Credentials", "Which employees have a usable SAP password saved for the shared runner (status only)."],

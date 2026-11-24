@@ -330,5 +330,254 @@ async function adminAudit() {
             h("p", { class: "hint", text: "Read-only. Audit entries never contain passwords, sealed credentials or tokens." })), list, more];
 }
 
+// ------------------------------------------------------------------ Dynamic Reports (several SAP reports, matched on the runner)
+// A dynamic report is a task with report_kind 'dynamic': the same assignments, schedule, central scheduler opt-in,
+// Run Now, sealed SAP passwords and e-mail as any task. Its definition (task_configs.config.dynamic) is checked by the
+// database on save (bah.dynamic_config_problems) and again by the runner (1.1.0+) before any SAP contact. Scheduled
+// runs start only after an administrator opts the report in under Settings > Scheduled reports.
+const DYN_TYPES = [["text", "Text"], ["date", "Date"], ["number", "Amount (number)"], ["integer", "Whole number"]];
+const dynSources = (c) => (((c || {}).dynamic || {}).sources || []);
+const dynSourceText = (c) => dynSources(c).map((s) => `${s.tcode}${s.variant ? ` (${s.variant})` : ""}`).join(" + ") || "—";
+// required columns as text, one per line: "Name" or "Name | alias | alias"
+const reqToText = (req) => (req || []).map((r) => (typeof r === "string" ? r : [r.name, ...(r.aliases || [])].join(" | "))).join("\n");
+const textToReq = (t) => String(t || "").split(/\r?\n/).map((l) => l.split("|").map((x) => x.trim()).filter(Boolean)).filter((p) => p.length)
+  .map(([name, ...aliases]) => (aliases.length ? { name, aliases } : name));
+const reqNames = (s) => textToReq(s.req.value).map((r) => (typeof r === "string" ? r : r.name));
+
+async function adminDynamic() {
+  const [tasks, people] = await Promise.all([
+    api("/tasks?select=id,name,description,execution_target,execution_mode,status,report_kind,scheduled_live_enabled,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&report_kind=eq.dynamic&order=name"),
+    api("/profiles?select=id,full_name&order=full_name")]);
+  const name = (id) => (people.find((p) => p.id === id) || {}).full_name || "?";
+  const sched = (t) => { const s = Array.isArray(t.schedules) ? t.schedules[0] : t.schedules; if (!s || s.status === "inactive") return "No schedule (manual only)";
+    return h("div", {}, schedText(s), h("div", {}, badge(t.scheduled_live_enabled ? "active" : "inactive"),
+      h("span", { class: "muted", text: t.scheduled_live_enabled ? " scheduled runs approved" : " scheduled runs off until approved" }))); };
+  return { actions: [h("button", { class: "primary", text: "New dynamic report", onclick: () => editDynamic(null) })],
+    content: [h("p", { class: "hint", text: "Each source runs with the run owner's own SAP user. Required columns are checked in every SAP layout " +
+        "before anything is extracted. Scheduled runs start only after approval under Settings > Scheduled reports." }),
+      ...table([["Report", (t) => h("div", {}, h("strong", { text: t.description || t.name }), h("div", { class: "muted", text: `Task: ${t.name}` }))],
+                ["SAP sources", (t) => dynSourceText((t.task_configs || {}).config)],
+                ["Schedule", sched],
+                ["E-mail", (t) => { const e = (t.task_configs || {}).email || {}; return e.enabled ? `${(e.to || []).length} To / ${(e.cc || []).length} CC` : "off"; }],
+                ["Assignments", (t) => (t.assignments || []).filter((a) => a.status === "active").map((a) => name(a.employee_id)).join(", ") || "—"],
+                ["Status", (t) => badge(t.status)],
+                ["", (t) => h("div", { class: "actions" },
+                   h("button", { class: "small", text: "Edit", onclick: () => editDynamic(t.id) }),
+                   h("button", { class: "small", text: "Run Now", disabled: t.status !== "active" || t.execution_mode === "scheduled_only",
+                                 onclick: () => runNow(t) }))]],
+               tasks, "No dynamic reports yet.")] };
+}
+
+async function editDynamic(id) {
+  const conn = (await api("/app_connections?select=id,code,display_name&status=eq.active"))[0];
+  if (!conn) { alert("No active SAP connection configured."); return; }
+  let t = { name: "", description: "", execution_target: "live_sap", execution_mode: "scheduled_and_manual", status: "active" };
+  let cfg = { report_kind: "dynamic", date_rule: "none", date_fields: [], output: { filename_pattern: "{ReportName}" },
+    dynamic: { version: 1, sources: [
+      { key: "src1", tcode: "", variant: "", role: "primary", row_key_column: "", required_columns: [] },
+      { key: "src2", tcode: "", variant: "", role: "lookup", row_key_column: "", required_columns: [] }],
+      extract: { name: "po", source: "src1", column: "", prefix: "", separator: "-", length: 10, missing_value: "Missing" },
+      match: { value: "po", lookup: "src2", column: "", length: 10, combine: "distinct_comma" },
+      aging: { column: "" }, columns: [], sort: [] } };
+  let em = { enabled: false, to: [], cc: [], bcc: [], subject: "", body: "", failure_subject: "", failure_body: "",
+             notify_success: true, notify_failure: false, delivery_format: "attachment" };
+  let sc = null, asg = [];
+  if (id) {
+    t = (await api(`/tasks?select=*&id=eq.${id}`))[0];
+    const c = (await api(`/task_configs?select=config,email&task_id=eq.${id}`))[0];
+    if (c) { cfg = c.config; em = { ...em, ...c.email }; }
+    sc = (await api(`/schedules?select=*&task_id=eq.${id}`))[0] || null;
+    asg = await api(`/assignments?select=id,employee_id,status&task_id=eq.${id}`);
+  }
+  const d = cfg.dynamic;
+  const f = {
+    name: inp(t.name, { maxlength: "120", required: true, placeholder: "e.g. LC Margin Held" }),
+    desc: inp(t.description || cfg.report_name || "", { maxlength: "120", required: true, placeholder: "Report name used in e-mails and file names" }),
+    mode: sel(t.execution_mode, [["scheduled_and_manual", "Scheduled and manual"], ["manual_only", "Manual Run Now only"], ["scheduled_only", "Scheduled only"]]),
+    status: sel(t.status, [["active", "Active"], ["inactive", "Inactive"], ...(t.status === "paused" ? [["paused", "Paused"]] : [])]),
+    freq: sel(sc && sc.status !== "inactive" ? sc.frequency : "", [["", "No schedule (manual only)"], ["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]]),
+    time: inp(sc ? sc.run_time.slice(0, 5) : "10:30", { type: "time" }),
+    weekday: sel(sc && sc.weekday ? String(sc.weekday) : "2", [["1", "Monday"], ["2", "Tuesday"], ["3", "Wednesday"], ["4", "Thursday"], ["5", "Friday"], ["6", "Saturday"], ["7", "Sunday"]]),
+    mday: inp(sc && sc.month_day ? sc.month_day : 1, { type: "number", min: "1", max: "31" }),
+    eon: chk(em.enabled), esub: inp(em.subject, { maxlength: "200", class: "wide", placeholder: "e.g. {report_name} - {execution_date}" }),
+    ebody: h("textarea", { class: "email-body", rows: "6" }),
+    efmt: sel(em.delivery_format, [["attachment", "Excel attachment only"], ["body", "Data table in the e-mail body only"], ["both", "Data table and Excel attachment"]]),
+    nsucc: chk(em.notify_success), nfail: chk(em.notify_failure),
+    // matching and transformation
+    xname: inp(d.extract.name, { maxlength: "20" }), xcol: inp(d.extract.column, { maxlength: "80" }),
+    xprefix: inp(d.extract.prefix, { maxlength: "10", placeholder: "e.g. 32" }), xsep: inp(d.extract.separator, { maxlength: "3" }),
+    xlen: inp(d.extract.length, { type: "number", min: "4", max: "20" }), xmiss: inp(d.extract.missing_value, { maxlength: "20" }),
+    mlookup: inp(d.match.lookup, { maxlength: "20" }), mcol: inp(d.match.column, { maxlength: "80" }),
+    agecol: inp(d.aging.column, { maxlength: "80" }),
+  };
+  f.ebody.value = em.body || "";
+  const rTo = emailChips((em.to || []), "name@company.com"), rCc = emailChips(em.cc || [], "Add CC"), rBcc = emailChips(em.bcc || [], "Add BCC");
+
+  // ---- SAP source reports (first = primary: one output row per row; the others are lookups)
+  const srcBox = h("div", {});
+  const sources = [];
+  const addSource = (s) => {
+    const x = { key: inp(s.key, { maxlength: "20", placeholder: "e.g. fbl3n" }), tcode: inp(s.tcode, { maxlength: "30", placeholder: "e.g. FBL3N" }),
+      variant: inp(s.variant || "", { maxlength: "40", placeholder: "e.g. /LC_Margin (empty = none)" }),
+      rowkey: inp(s.row_key_column, { maxlength: "80", placeholder: "column that every real row has" }),
+      req: h("textarea", { rows: "6", class: "mono", placeholder: "One column per line. Optional other names: Name | other name" }) };
+    x.req.value = reqToText(s.required_columns);
+    x.card = h("div", { class: "fieldset" });
+    const drawCard = () => {
+      const primary = sources.indexOf(x) === 0;
+      x.card.replaceChildren(h("div", { class: "card-head" }, h("strong", { text: primary ? "Primary report (one output row per row)" : "Lookup report (matched by the extracted value)" }),
+        primary || sources.length <= 2 ? null : h("button", { type: "button", class: "small secondary", text: "Remove", onclick: () => { sources.splice(sources.indexOf(x), 1); drawSources(); } })),
+        h("div", { class: "grid-3" }, field("Source key", x.key, "Short name used in the mappings below"), field("T-code", x.tcode), field("Variant", x.variant, "Its layout must show every required column")),
+        h("div", { class: "grid-2" }, field("Required columns", x.req, "Checked in the SAP layout BEFORE extraction; a missing one stops the run and notifies the employee and administrators."),
+          field("Row key column", x.rowkey, "Rows without a value here are SAP total/blank lines and are left out")));
+    };
+    x.draw = drawCard;
+    sources.push(x);
+  };
+  const drawSources = () => { sources.forEach((x) => x.draw()); srcBox.replaceChildren(...sources.map((x) => x.card)); };
+  d.sources.forEach(addSource);
+  drawSources();
+  const addSrcBtn = h("button", { type: "button", class: "secondary", text: "Add lookup report", onclick: () => {
+    if (sources.length >= 5) return; addSource({ key: `src${sources.length + 1}`, tcode: "", variant: "", role: "lookup", row_key_column: "", required_columns: [] }); drawSources(); } });
+
+  // ---- output columns (exact order) + sort
+  const outBody = h("tbody", {});
+  const outRows = [];
+  const valueOptions = () => {
+    const opts = [[`extract:${f.xname.value.trim() || "po"}`, `Extracted value (${f.xname.value.trim() || "po"})`], ["aging", "Aging in days (execution date - aging date column)"]];
+    for (const s of sources) for (const n of reqNames(s)) opts.push([`${s.key.value.trim()}:${n}`, `${s.tcode.value.trim() || s.key.value.trim()}: ${n}`]);
+    return opts;
+  };
+  const addOut = (c) => {
+    const r = { heading: inp(c.heading, { maxlength: "80" }), value: h("select", {}), type: sel(c.type || "text", DYN_TYPES), saved: c.value };
+    r.tr = h("tr", {}, h("td", {}, r.heading), h("td", {}, r.value), h("td", {}, r.type),
+      h("td", {}, h("div", { class: "actions" },
+        h("button", { type: "button", class: "small secondary", text: "↑", "aria-label": "Move up", onclick: () => { const i = outRows.indexOf(r); if (i > 0) { outRows.splice(i - 1, 0, outRows.splice(i, 1)[0]); drawOut(); } } }),
+        h("button", { type: "button", class: "small secondary", text: "↓", "aria-label": "Move down", onclick: () => { const i = outRows.indexOf(r); if (i < outRows.length - 1) { outRows.splice(i + 1, 0, outRows.splice(i, 1)[0]); drawOut(); } } }),
+        h("button", { type: "button", class: "small secondary", text: "Remove", onclick: () => { outRows.splice(outRows.indexOf(r), 1); drawOut(); } }))));
+    outRows.push(r);
+  };
+  const drawOut = () => {
+    const opts = valueOptions();
+    for (const r of outRows) {
+      const cur = r.value.value || r.saved;
+      r.value.replaceChildren(...opts.map(([v, l]) => h("option", { value: v, text: l })),
+        ...(cur && !opts.some(([v]) => v === cur) ? [h("option", { value: cur, text: `${cur} (not a required column)` })] : []));
+      r.value.value = cur || opts[0][0];
+    }
+    outBody.replaceChildren(...outRows.map((r) => r.tr));
+    const curSort = sortWanted !== null ? sortWanted : f.sortcol.value;     // saved sort on the first draw, then the choice
+    sortWanted = null;
+    f.sortcol.replaceChildren(h("option", { value: "", text: "SAP order (no sorting)" }), ...outRows.map((r) => h("option", { value: r.heading.value.trim(), text: r.heading.value.trim() || "(no heading)" })));
+    f.sortcol.value = outRows.some((r) => r.heading.value.trim() === curSort) ? curSort : "";
+  };
+  f.sortcol = h("select", {});
+  let sortWanted = ((d.sort || [])[0] || {}).heading || "";
+  f.sortdir = sel(((d.sort || [])[0] || {}).direction || "desc", [["desc", "Descending (highest first)"], ["asc", "Ascending"]]);
+  d.columns.forEach(addOut);
+  drawOut();
+  const refresh = h("button", { type: "button", class: "secondary", text: "Refresh column choices", onclick: drawOut });
+  const addOutBtn = h("button", { type: "button", class: "secondary", text: "Add output column", onclick: () => { addOut({ heading: "", value: "", type: "text" }); drawOut(); } });
+
+  // ---- schedule fields shown for the chosen frequency
+  const sWeek = field("Weekday", f.weekday), sMday = field("Day of month", f.mday);
+  const syncSched = () => { sWeek.hidden = f.freq.value !== "weekly"; sMday.hidden = f.freq.value !== "monthly"; };
+  f.freq.addEventListener("change", syncSched); syncSched();
+
+  let assignBoxes = [];
+  const save = h("button", { class: "primary", text: id ? "Save changes" : "Create dynamic report" });
+  const picker = employeePicker({
+    load: async () => (await api("/profiles?select=id,full_name,email,role,status&order=full_name")).filter((p) => p.status === "active")
+      .map((p) => { const a = asg.find((x) => x.employee_id === p.id); return { p, a, box: { checked: !!(a && a.status === "active") } }; }),
+    onLoaded: (entries) => { assignBoxes = entries; save.disabled = false; }, onChange: () => {} });
+
+  const build = () => {
+    const srcs = sources.map((x, i) => ({ key: x.key.value.trim(), tcode: x.tcode.value.trim().toUpperCase(), variant: x.variant.value.trim(),
+      role: i === 0 ? "primary" : "lookup", row_key_column: x.rowkey.value.trim(), required_columns: textToReq(x.req.value) }));
+    const len = Number(f.xlen.value);
+    const config = { ...cfg, tcode: srcs[0].tcode, report_kind: "dynamic", report_name: f.desc.value.trim(), date_rule: "none", date_fields: [],
+      dynamic: { version: 1, sources: srcs,
+        extract: { name: f.xname.value.trim(), source: srcs[0].key, column: f.xcol.value.trim(), prefix: f.xprefix.value.trim(),
+                   separator: f.xsep.value, length: len, missing_value: f.xmiss.value.trim() || "Missing" },
+        match: { value: f.xname.value.trim(), lookup: f.mlookup.value.trim(), column: f.mcol.value.trim(), length: len, combine: "distinct_comma" },
+        aging: { column: f.agecol.value.trim() },
+        columns: outRows.map((r) => ({ heading: r.heading.value.trim(), value: r.value.value,
+                                       ...(r.value.value === "aging" ? { type: "integer" } : r.type.value !== "text" ? { type: r.type.value } : {}) })),
+        sort: f.sortcol.value ? [{ heading: f.sortcol.value, direction: f.sortdir.value }] : [] } };
+    delete config.variant;                                    // never a top-level variant (older runners)
+    return config;
+  };
+  const preview = h("pre", { class: "prewrap mono" });
+  const showJson = h("details", { class: "subsection", ontoggle: () => { preview.textContent = JSON.stringify(build(), null, 1); } },
+    h("summary", { text: "Definition as saved (read-only)" }), preview);
+
+  const err = h("div", { class: "err" });
+  const form = h("form", { class: "task-form", onsubmit: async (e) => {
+    e.preventDefault(); err.textContent = ""; save.disabled = true;
+    try {
+      if (!f.name.value.trim() || !f.desc.value.trim()) throw new Error("Task name and report name are required.");
+      const to = rTo.values(), cc = rCc.values(), bcc = rBcc.values();
+      if (rTo.pendingInvalid() || rCc.pendingInvalid() || rBcc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
+      if (f.eon.checked && !to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
+      const config = build();
+      const problems = await api("/rpc/dynamic_config_problems", { method: "POST", body: JSON.stringify({ p_config: config }) });
+      if (problems && problems.length) throw new Error("Please correct the definition: " + problems.join("; "));
+      const row = { name: f.name.value.trim(), description: f.desc.value.trim(), connection_id: conn.id, execution_target: "live_sap",
+                    execution_mode: f.mode.value, status: f.status.value, template_id: null, template_version: null };
+      const saved = id ? (await api(`/tasks?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(row), headers: { prefer: "return=representation" } }))[0]
+                       : (await api("/tasks", { method: "POST", body: JSON.stringify({ ...row, report_kind: "dynamic", created_by: me.user_id }), headers: { prefer: "return=representation" } }))[0];
+      const tid = saved.id;
+      const email = { ...em, enabled: f.eon.checked, to, cc, bcc, subject: f.esub.value.trim(), body: f.ebody.value,
+                      notify_success: f.nsucc.checked, notify_failure: f.nfail.checked, delivery_format: f.efmt.value, format_version: 2 };
+      await upsert("task_configs", { task_id: tid, config, email }, "task_id");
+      if (f.freq.value) {
+        await upsert("schedules", { task_id: tid, frequency: f.freq.value, run_time: f.time.value || "08:00", status: "active",
+          weekday: f.freq.value === "weekly" ? Number(f.weekday.value) : null, anchor_date: null,
+          month_day: f.freq.value === "monthly" ? Number(f.mday.value) : null, last_day_of_month: false }, "task_id");
+      } else if (sc) {
+        await api(`/schedules?task_id=eq.${tid}`, { method: "PATCH", body: JSON.stringify({ status: "inactive" }) });
+      }
+      for (const { p, a, box } of assignBoxes) {
+        if (box.checked && !a) await api("/assignments", { method: "POST", body: JSON.stringify({ task_id: tid, employee_id: p.id, created_by: me.user_id }) });
+        else if (a && box.checked !== (a.status === "active"))
+          await api(`/assignments?id=eq.${a.id}`, { method: "PATCH", body: JSON.stringify({ status: box.checked ? "active" : "inactive" }) });
+      }
+      tab = "admin_dynamic"; render();
+    } catch (x) { err.textContent = x.message; } finally { save.disabled = false; }
+  } },
+    pageHead(id ? `Edit dynamic report: ${t.name}` : "New dynamic report", "Several SAP reports, matched and transformed on the shared BAH runner."),
+    h("section", { class: "card form-card" }, h("h2", { text: "1. Report details" }),
+      h("div", { class: "grid-2" }, field("Task name", f.name), field("Report name", f.desc, "Shown in e-mails ({report_name}) and the workbook name."),
+        field("Execution mode", f.mode), field("Status", f.status))),
+    h("section", { class: "card form-card" }, h("h2", { text: "2. SAP source reports" }), srcBox, h("div", { class: "actions" }, addSrcBtn)),
+    h("section", { class: "card form-card" }, h("h2", { text: "3. Matching and transformation" }),
+      h("p", { class: "hint", text: "The value is taken from a text column of the primary report: <prefix><separator><digits> becomes the prefix followed by the digits padded with zeros to the full length (32-4062 -> 3200004062). " +
+        "Rows without it are kept and show the 'missing' text. Every primary row stays a separate output row; several lookup rows for one value are combined into one cell (distinct values, comma-separated)." }),
+      h("div", { class: "grid-3" }, field("Value name", f.xname), field("Text column (primary report)", f.xcol), field("Prefix", f.xprefix),
+        field("Separator", f.xsep), field("Full length (digits)", f.xlen), field("Shown when not found", f.xmiss),
+        field("Lookup source key", f.mlookup), field("Lookup column with the same value", f.mcol), field("Aging date column (primary report)", f.agecol, "Aging = execution date minus this date, in days"))),
+    h("section", { class: "card form-card" }, h("h2", { text: "4. Output columns (in this order)" }),
+      h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Heading", "Value", "Type", ""].map((x) => h("th", { text: x })))), outBody)),
+      h("div", { class: "actions" }, addOutBtn, refresh),
+      h("div", { class: "grid-2" }, field("Sort by", f.sortcol), field("Direction", f.sortdir)), showJson),
+    h("section", { class: "card form-card" }, h("h2", { text: "5. Schedule" }),
+      h("div", { class: "grid-3" }, field("Frequency", f.freq), field("Time (Asia/Karachi)", f.time), sWeek, sMday),
+      h("p", { class: "hint", text: "Runs on the shared BAH runner. Scheduled runs start only after an administrator opts this report in under Settings > Scheduled reports; until then only Run Now works." })),
+    h("section", { class: "card form-card" }, h("h2", { text: "6. Assigned employees" }), picker.el,
+      h("p", { class: "hint", text: "SAP is accessed with the run owner's own saved SAP password; each source report uses the same SAP user." })),
+    h("section", { class: "card form-card" }, h("div", { class: "card-head" }, h("h2", { text: "7. E-mail" }), h("label", { class: "toggle" }, f.eon, " Send report e-mail")),
+      h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el), field("BCC", rBcc.el)),
+      h("div", { class: "grid-2" }, field("Delivery format", f.efmt), h("div", {})), field("Subject", f.esub),
+      h("label", { class: "field" }, "Body", placeholderBar(f.ebody), f.ebody),
+      h("div", { class: "grid-2" }, field("Send the report e-mail when the run succeeds", f.nsucc), field("Send a failure e-mail when the run fails", f.nfail)),
+      h("p", { class: "hint", text: "Missing layout columns are always reported to the assigned employee(s) and the administrators, whatever is set here." })),
+    err,
+    h("div", { class: "sticky-actions" }, h("span", { class: "hint", text: id ? "Changes apply to future runs." : "" }),
+      h("div", { class: "actions" }, h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() }), save)));
+  mainArea().replaceChildren(form);
+  save.disabled = true;
+  picker.start();
+}
+
 Object.assign(ADMIN_VIEWS, { admin_people: adminPeopleV2, admin_invitations: adminInvitations, admin_credentials: adminCredentials,
-  admin_vms: adminVms, admin_runners: adminRunners, admin_system: adminSystemJobs, admin_audit: adminAudit });
+  admin_vms: adminVms, admin_runners: adminRunners, admin_system: adminSystemJobs, admin_audit: adminAudit, admin_dynamic: adminDynamic });
