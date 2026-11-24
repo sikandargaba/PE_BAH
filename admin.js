@@ -47,7 +47,7 @@ async function adminDashboard() {
     h("div", { class: "card" }, h("h2", { text: "Recent execution history" }),
       ...table([["Task", (o) => repName(o.tasks)], ["Type", (o) => o.kind === "relay" ? "local BAH run" : o.kind],
                 ["Due", (o) => fmt(o.due_at)], ["Status", (o) => badge(o.status)],
-                ["Rows", (o) => { const e = (o.executions || [])[0]; return e && e.row_count != null ? String(e.row_count) : "—"; }]],
+                ["Rows", (o) => { const e = (o.executions || [])[0]; return e && e.row_count != null ? rowsText(e) : "—"; }]],
                occ.slice(0, 10), "No executions yet."))];
 }
 function inp(value, attrs = {}) { return h("input", { value: value ?? "", ...attrs }); }
@@ -491,7 +491,7 @@ async function adminRuns() {
                    return h("div", {}, who, e && e.sap_user ? h("div", { class: "muted", text: `SAP ${e.sap_user}` }) : null); }],
                 ["Due", (o) => fmt(o.due_at)], ["Status", (o) => badge(o.status)],
                 ["Last attempt", (o) => { const e = (o.executions || []).sort((a, b) => b.attempt_no - a.attempt_no)[0];
-                   return e ? h("div", {}, badge(e.status), ` ${e.engine || ""} ${e.row_count != null ? e.row_count + " rows" : ""}`,
+                   return e ? h("div", {}, badge(e.status), ` ${e.engine || ""} ${e.row_count != null ? rowsText(e) : ""}`,
                      e.error_class ? h("div", { class: "muted", text: `${e.error_class}${e.error_detail ? " - " + e.error_detail : ""}` }) : null) : "not started"; }],
                 ["", (o) => ["pending", "waiting_retry", "claimed"].includes(o.status)
                    ? h("button", { class: "secondary", text: "Cancel", onclick: async () => {
@@ -590,14 +590,73 @@ async function adminPeople() {
 }
 
 // ------------------------------------------------------------------ settings (live SAP switch; e-mail status)
+// ------------------------------------------------------------------ scheduled reports (central scheduler)
+// Status from bah.admin_scheduler_status (null before the scheduler migration: the card is not shown).
+// Switch and per-task opt-in are plain admin writes; the database enforces everything (enabled_at is set by the
+// server, switching off / opting out cancels queued scheduled runs, employees cannot change either).
+function scheduleText(s) {
+  if (!s) return "no schedule";
+  const t = String(s.run_time || "").slice(0, 5);
+  const wd = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][s.weekday] || `day ${s.weekday}`;   // ISO weekday
+  const day = { daily: "daily", weekly: `every ${wd}`, fortnightly: "fortnightly",
+                monthly: s.month_day ? `monthly (day ${s.month_day})` : "monthly (last day)" }[s.frequency] || s.frequency;
+  return `${day} at ${t} PKT${s.status !== "active" ? ` (${s.status})` : ""}`;
+}
+function schedulerCard(st) {
+  if (!st) return null;
+  const on = st.settings && st.settings.enabled === true;
+  const runner = st.shared_runner || {};
+  const last = (st.state && st.state.last_result) || {};
+  const counts = st.last_24h || {};
+  const confirmed = ((st.no_data_messages || {}).entries || []).length;
+  const toggleTask = (t) => h("button", { class: t.enabled ? "secondary small" : "small", text: t.enabled ? "Stop schedule" : "Run on schedule",
+    onclick: async (e) => {
+      const msg = t.enabled
+        ? `Stop running "${t.name}" on its schedule? Runs already queued for it are cancelled.`
+        : `Run "${t.name}" automatically on its schedule (${scheduleText(t.schedule)}) on the shared VM runner?\n\n` +
+          (t.assignees_ready < t.assignees ? `${t.assignees - t.assignees_ready} of ${t.assignees} assignee(s) have not saved their SAP password yet - ` +
+           "they and the administrators get a \"could not be completed\" notice at each scheduled time until they do.\n\n" : "") +
+          "Live SAP runs with each assignee's own saved password. Failures are e-mailed to the assignees and administrators.";
+      if (!confirm(msg)) return;
+      e.target.disabled = true;
+      try { await api(`/tasks?id=eq.${t.task_id}`, { method: "PATCH", body: JSON.stringify({ scheduled_live_enabled: !t.enabled }),
+                                                      headers: { prefer: "return=minimal" } }); render(); }
+      catch (x) { alert(x.message); e.target.disabled = false; }
+    } });
+  return h("div", { class: "card" }, h("h2", { text: "Scheduled reports (shared VM runner)" }),
+    h("p", {}, "Central scheduling is ", badge(on ? "on" : "off"),
+      on ? `. On since ${fmt(st.settings.enabled_at)}; a run not started within ${st.settings.grace_minutes} minutes counts as missed.`
+         : ". While off, no report runs on a schedule and Run Now works as before."),
+    h("p", { class: "hint", text: `Shared runner: ${runner.name || "none"} - ${runner.online ? "online" : "OFFLINE"}` +
+      `${runner.last_seen_at ? ` (last seen ${fmt(runner.last_seen_at)})` : ""}. Scheduler last checked: ` +
+      `${st.state && st.state.last_tick_at ? fmt(st.state.last_tick_at) : "never"}` +
+      `${on ? ` · last 24 h: ${counts.succeeded || 0} completed, ${counts.failed || 0} not completed` +
+              ` (${counts.not_ready || 0} not ready, ${counts.runner_unavailable || 0} runner unavailable)` : ""}.` }),
+    h("p", { class: "hint", text: `Confirmed SAP "no data" messages: ${confirmed}. A report that returns no rows counts as ` +
+      "successful (\"No Records Found\" e-mail) only for messages confirmed from a supervised run; anything else stays a failure." }),
+    h("div", { class: "actions" },
+      h("button", { text: on ? "Switch central scheduling off" : "Switch central scheduling on", onclick: async () => {
+        if (!confirm(on ? "Switch central scheduling OFF? Scheduled runs that are queued are cancelled; nothing runs on a schedule until you switch it on again."
+                        : "Switch central scheduling ON? Only tasks you opt in below run on their schedule (nothing for earlier times).")) return;
+        try { await upsert("settings", { key: "scheduler", value: { enabled: !on, grace_minutes: (st.settings && st.settings.grace_minutes) || 60 },
+                                         updated_by: me.user_id }, "key"); render(); }
+        catch (x) { alert(x.message); } } })),
+    ...table([["Report", (t) => h("strong", { text: t.name })],
+              ["Schedule", (t) => scheduleText(t.schedule)],
+              ["Assignees ready", (t) => `${t.assignees_ready} / ${t.assignees}`],
+              ["On schedule", (t) => h("div", {}, badge(t.enabled ? "on" : "off"), t.since ? h("div", { class: "muted", text: `since ${fmt(t.since)}` }) : null)],
+              ["", toggleTask]], st.tasks || [], "No live report with a schedule."));
+}
+
 async function adminSettings() {
+  const sched = await optionalRpc("admin_scheduler_status", {}, null);
   const rows = await api("/settings?select=key,value,updated_at");
   const get = (k) => (rows.find((r) => r.key === k) || {}).value || {};
   const liveOn = get("live_sap").manual_enabled === true;
   const mailOn = get("email_delivery").enabled === true;
   return [h("div", { class: "card" }, h("h2", { text: "Live SAP" }),
     h("p", {}, "Manual live SAP Run Now is ", badge(liveOn ? "authorised" : "not authorised"),
-      ". Scheduled live SAP runs are impossible by design."),
+      sched ? ". Scheduled runs are controlled separately under Scheduled reports." : ". Scheduled live SAP runs are impossible by design."),
     h("button", { text: liveOn ? "Withdraw live SAP authorisation" : "Authorise manual live SAP Run Now", onclick: async () => {
       if (!confirm(liveOn ? "Withdraw authorisation for live SAP runs?" : "Authorise MANUAL, ATTENDED live SAP Run Now (each run still needs your confirmation)?")) return;
       try { await upsert("settings", { key: "live_sap", value: { manual_enabled: !liveOn }, updated_by: me.user_id }, "key"); render(); }
@@ -627,7 +686,7 @@ async function adminSettings() {
         try {
           const r = await api("/rpc/admin_queue_test_email", { method: "POST", body: "{}" });
           alert(`Test e-mail queued for ${r.to}. It is sent within a few minutes; see E-mail Notifications for the result.`);
-        } catch (x) { alert(x.message); } finally { e.target.disabled = false; } } }) : null))];
+        } catch (x) { alert(x.message); } finally { e.target.disabled = false; } } }) : null)), schedulerCard(sched)].filter(Boolean);
 }
 
 async function mailCall(action) {

@@ -22,6 +22,8 @@ function h(tag, attrs = {}, ...kids) {
   for (const c of kids.flat()) if (c !== null && c !== undefined) el.append(c.nodeType ? c : document.createTextNode(String(c)));
   return el;
 }
+// "0 rows" of a successful run = SAP confirmed there were no matching records (never a failure wording)
+const rowsText = (e) => (e.status === "succeeded" && e.row_count === 0 ? "no records found" : `${e.row_count} rows`);
 const fmt = (t) => (t ? new Date(t).toLocaleString("en-GB", { timeZone: "Asia/Karachi", dateStyle: "medium", timeStyle: "short" }) : "—");
 // Same badge colours as the local BAH portal (core.js BADGES).
 const BADGES = { active: "ok", succeeded: "ok", passed: "ok", online: "ok", paused: "warn", waiting_retry: "warn",
@@ -378,7 +380,7 @@ async function taskDetail(t) {
     ...table([["Due", (o) => fmt(o.due_at)], ["Type", (o) => o.kind], ["Status", (o) => badge(o.status)],
               ["Attempts", (o) => (o.executions || []).sort((a, b) => a.attempt_no - b.attempt_no).map((e) =>
                  h("div", {}, `#${e.attempt_no} `, badge(e.status), ` ${fmt(e.started_at)} → ${fmt(e.finished_at)}`,
-                   e.row_count != null ? ` · ${e.row_count} rows × ${e.column_count} cols` : "",
+                   e.row_count != null ? (e.status === "succeeded" && e.row_count === 0 ? " · no records found" : ` · ${e.row_count} rows × ${e.column_count} cols`) : "",
                    e.error_class ? h("div", { class: "muted", text: `${e.error_class}${e.error_detail ? " - " + e.error_detail : ""}` }) : null))],
               ["Report", (o) => (o.report_files || []).filter((f) => f.status === "available").map((f) =>
                  h("button", { class: "secondary", text: "Download", onclick: (e) => download(f.id, e.target) }))]],
@@ -483,7 +485,8 @@ function watchRun(occurrenceId, btn, status, shared = false) {
     const s = o ? o.status : "pending";
     if (s === "pending" || s === "waiting_retry") say("hint", shared ? "Queued - waiting for the shared BAH runner…" : "Queued - waiting for your BAH Runner to pick it up…");
     else if (s === "claimed") say("hint", shared ? "Running on the shared BAH runner…" : "Running on your PC - keep Start BAH Runner open…");
-    else if (s === "succeeded") { say("hint ok-text", `Completed${e && e.row_count != null ? ` - ${e.row_count} rows` : ""}. See Execution History and Reports.`); if (btn) btn.disabled = false; return; }
+    else if (s === "succeeded") { say("hint ok-text", e && e.row_count === 0 ? "Completed - no matching records were found for the selected parameters (this is not an error)."
+                                                          : `Completed${e && e.row_count != null ? ` - ${e.row_count} rows` : ""}. See Execution History and Reports.`); if (btn) btn.disabled = false; return; }
     else if (s === "failed") { say("error", `Failed${e && e.error_class ? `: ${e.error_class}${e.error_detail ? " - " + e.error_detail : ""}` : ""}. No automatic retry.`); if (btn) btn.disabled = false; return; }
     else if (s === "cancelled") { say("error", "Cancelled."); if (btn) btn.disabled = false; return; }
     if (Date.now() - t0 < 45 * 60000) setTimeout(tick, 5000);
@@ -524,7 +527,7 @@ const VIEWS = {
                   ["Type", (o) => o.kind],
                   ["Status", (o) => badge(o.status)],
                   ["Last attempt", (o) => { const e = (o.executions || []).sort((a, b) => b.attempt_no - a.attempt_no)[0];
-                    return e ? h("div", {}, badge(e.status), ` ${e.row_count ?? ""}${e.row_count != null ? " rows" : ""}`,
+                    return e ? h("div", {}, badge(e.status), ` ${e.row_count != null ? rowsText(e) : ""}`,
                                  e.error_class ? h("div", { class: "muted", text: e.error_class }) : null) : "not started"; }],
                   ["Attempts", (o) => `${o.attempts} / ${o.max_attempts}`]], rows, "No task runs yet.");
   },
