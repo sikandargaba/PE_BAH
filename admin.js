@@ -83,39 +83,54 @@ const HIDDEN_TASK_IDS = new Set([
 ]);
 const visibleTask = (id) => !HIDDEN_TASK_IDS.has(id);
 
-// Standard and dynamic (multi-source) reports in ONE list, tagged by kind. Each kind keeps its own editor; Run Now,
-// schedules, assignments and run history work the same for both.
+// Tasks = SCHEDULING only (schedule, assignees, e-mail, Run Now). Report definitions live elsewhere: static reports
+// under Static Reports (bah.report_templates), dynamic reports under Dynamic Reports (bah.dynamic_reports). Each task
+// references exactly one definition of its own type, and the two types are listed and edited separately here.
 const reportKindTag = (t) => h("span", { class: `badge ${t.report_kind === "dynamic" ? "info" : ""}`,
-                                         text: t.report_kind === "dynamic" ? "dynamic" : "standard" });
-const editReport = (t) => t.report_kind === "dynamic" ? editDynamic(t.id) : editTask(t.id);
+                                         text: t.report_kind === "dynamic" ? "Dynamic report" : "Static report" });
+const editReport = (t) => t.report_kind === "dynamic" ? editDynamicTask(t.id) : editTask(t.id);
 async function adminTasks() {
-  const [allTasks, people] = await Promise.all([
-    api("/tasks?select=id,name,description,execution_target,execution_mode,status,report_kind,scheduled_live_enabled,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&order=name"),
-    api("/profiles?select=id,full_name,email,role,status&order=full_name")]);
+  const [allTasks, people, templates, dynDefs] = await Promise.all([
+    api("/tasks?select=id,name,description,execution_target,execution_mode,status,report_kind,scheduled_live_enabled,template_id,template_version,dynamic_report_id,dynamic_report_version,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&order=name"),
+    api("/profiles?select=id,full_name,email,role,status&order=full_name"),
+    api("/report_templates?select=id,name,description,version&order=name"),
+    api("/dynamic_reports?select=id,name,description,version&order=name")]);
   const tasks = allTasks.filter((t) => !HIDDEN_ADMIN_TASK_IDS.has(t.id));
   const name = (id) => (people.find((p) => p.id === id) || {}).full_name || "?";
-  const sapText = (t) => t.report_kind === "dynamic" ? dynSourceText((t.task_configs || {}).config)
-                                                     : ((t.task_configs || {}).config || {}).tcode || "—";
   const firstSchedule = (t) => Array.isArray(t.schedules) ? t.schedules[0] : t.schedules;
   const onSchedule = (t) => { const s = firstSchedule(t);
     return !s || s.status === "inactive" ? "—" : badge(t.scheduled_live_enabled ? "on" : "off"); };
-  return { actions: [h("button", { class: "primary", text: "New task", onclick: () => editTask(null) }),
-                     h("button", { class: "secondary", text: "New dynamic report", onclick: () => editDynamic(null) })],
-    content: table([["Description", (t) => h("div", {}, h("strong", { text: t.description || t.name }), t.description && t.description !== t.name ? h("div", { class: "muted", text: `Task: ${t.name}` }) : null)],
-              ["Kind", reportKindTag],
-              ["SAP report(s)", sapText],
-              ["Schedule", (t) => schedText(firstSchedule(t))],
-              ["Next run", (t) => nextRun(t)],
-              ["On schedule", onSchedule],
-              ["Type", (t) => targetBadge(t.execution_target)],
-              ["E-mail", (t) => { const e = (t.task_configs || {}).email || {}; return e.enabled ? `${(e.to || []).length} To / ${(e.cc || []).length} CC` : "off"; }],
-              ["Assignments", (t) => (t.assignments || []).filter((a) => a.status === "active").map((a) => name(a.employee_id)).join(", ") || "—"],
-              ["Status", (t) => badge(t.status)],
-              ["", (t) => h("div", { class: "actions" },
-                 h("button", { class: "small", text: "Edit", onclick: () => editReport(t) }),
-                 h("button", { class: "small", text: "Run Now", disabled: t.status !== "active" || t.execution_mode === "scheduled_only",
-                               onclick: () => runNow(t) }))]],
-             tasks, "No tasks yet - create the first one.") };
+  // the definition the task was scheduled from, with the version it runs
+  const reportCell = (t) => {
+    const dyn = t.report_kind === "dynamic";
+    const def = dyn ? dynDefs.find((d) => d.id === t.dynamic_report_id) : templates.find((x) => x.id === t.template_id);
+    const ver = dyn ? t.dynamic_report_version : t.template_version;
+    if (!def) return h("div", {}, h("strong", { text: repName(t) }),
+      h("div", { class: "muted", text: dyn ? "Not linked to a dynamic report" : "Saved configuration (no static report)" }));
+    return h("div", {}, h("strong", { text: def.description || def.name }),
+      h("div", { class: "muted", text: `Version ${ver}${def.version > ver ? ` - version ${def.version} available` : ""}` }));
+  };
+  const cols = (sapText) => [["Task", (t) => h("strong", { text: t.name })],
+    ["Report type", reportKindTag], ["Report", reportCell], ["SAP report(s)", sapText],
+    ["Schedule", (t) => schedText(firstSchedule(t))], ["Next run", (t) => nextRun(t)], ["On schedule", onSchedule],
+    ["Type", (t) => targetBadge(t.execution_target)],
+    ["E-mail", (t) => { const e = (t.task_configs || {}).email || {}; return e.enabled ? `${(e.to || []).length} To / ${(e.cc || []).length} CC` : "off"; }],
+    ["Assignments", (t) => (t.assignments || []).filter((a) => a.status === "active").map((a) => name(a.employee_id)).join(", ") || "—"],
+    ["Status", (t) => badge(t.status)],
+    ["", (t) => h("div", { class: "actions" },
+       h("button", { class: "small", text: "Edit", onclick: () => editReport(t) }),
+       h("button", { class: "small", text: "Run Now", disabled: t.status !== "active" || t.execution_mode === "scheduled_only",
+                     onclick: () => runNow(t) }))]];
+  const staticTasks = tasks.filter((t) => t.report_kind !== "dynamic"), dynTasks = tasks.filter((t) => t.report_kind === "dynamic");
+  return { actions: [h("button", { class: "primary", text: "New static report task", onclick: () => editTask(null) }),
+                     h("button", { class: "secondary", text: "New dynamic report task", onclick: () => editDynamicTask(null) })],
+    content: [
+      h("div", { class: "card", "data-section": "static-tasks" }, h("h2", { text: "Static report schedules" }),
+        h("p", { class: "hint", text: "Tasks that run a report from Static Reports (one T-Code, variant and date conditions)." }),
+        ...table(cols((t) => ((t.task_configs || {}).config || {}).tcode || "—"), staticTasks, "No static report tasks yet.")),
+      h("div", { class: "card", "data-section": "dynamic-tasks" }, h("h2", { text: "Dynamic report schedules" }),
+        h("p", { class: "hint", text: "Tasks that run a report from Dynamic Reports (several SAP reports matched on the shared runner)." }),
+        ...table(cols((t) => dynSourceText((t.task_configs || {}).config)), dynTasks, "No dynamic report tasks yet."))] };
 }
 
 // ------------------------------------------------------------------ task create / edit (card layout)
@@ -429,12 +444,12 @@ async function editTask(id) {
       tab = "admin_tasks"; render();
     } catch (x) { err.textContent = x.message; } finally { save.disabled = false; }
   } },
-    pageHead(id ? `Edit task: ${t.name}` : "New task", id ? "Report task, schedule, assignees and e-mail delivery." : "Create a report task from a report template."),
+    pageHead(id ? `Edit static report task: ${t.name}` : "New static report task", id ? "Schedule, assignees and e-mail for a static report." : "Schedule a report from Static Reports."),
     id && t.execution_target === "live_sap" ? h("div", { class: "notice", text: SYNC_NOTE }) : null,
     h("section", { class: "card form-card" }, h("h2", { text: "1. Task details" }),
       h("div", { class: "grid-2" },
         field("Task name", f.name, "Your own name for this task."),
-        field("Report name", f.tpl, "From Report Templates. Its saved SAP configuration is used; later template edits do not change this task."),
+        field("Static report", f.tpl, "From Static Reports. Its saved SAP configuration is used; later edits to the static report do not change this task."),
         field("Execution mode", f.mode), field("Status", f.status),
         field("Runs on", f.target, "Live SAP runs only by Run Now, attended, on the employee's own runner."),
         upgradeRow ? h("div", { class: "span-2" }, upgradeRow) : null)),
@@ -720,7 +735,7 @@ async function mailCall(action) {
 }
 
 // ------------------------------------------------------------------ report templates
-// Obsolete test templates hidden from the Report Templates grid ONLY (by template id). The records are untouched.
+// Obsolete test templates hidden from the Static Reports grid ONLY (by template id). The records are untouched.
 const HIDDEN_ADMIN_TEMPLATE_IDS = new Set([
   "d215e69a-6a57-48ec-a02c-ae7ca1f087ac",   // MB51 test
 ]);
@@ -729,14 +744,14 @@ async function adminTemplates() {
   const rows = (await api("/report_templates?select=id,name,description,version,status,config&order=name"))
     .filter((t) => !HIDDEN_ADMIN_TEMPLATE_IDS.has(t.id));
   rows.sort((a, b) => tplName(a).localeCompare(tplName(b)));
-  return { actions: [h("button", { class: "primary", text: "New template", onclick: () => editTemplate(null) })],
+  return { actions: [h("button", { class: "primary", text: "New static report", onclick: () => editTemplate(null) })],
     content: table([["Description", (t) => h("strong", { text: tplName(t) })],
               ["Source", () => "SAP Fiori"], ["T-Code", (t) => t.config.tcode || "—"], ["Variant", (t) => t.config.variant || "—"],
               ["Date rule", (t) => noDates(t.config) ? RULE_LABELS.none : RULE_LABELS[t.config.date_rule] || t.config.date_rule || "—"],
               ["Reporting period (today)", (t) => noDates(t.config) ? "Not applicable" : periodText(t.config.date_rule, t.config.custom_from, t.config.custom_to)],
               ["Version", (t) => String(t.version)], ["Status", (t) => badge(t.status)],
               ["", (t) => h("div", { class: "actions" }, h("button", { class: "small", text: "Edit", onclick: () => editTemplate(t) }))]],
-             rows, "No templates yet - create the first one.") };
+             rows, "No static reports yet - create the first one.") };
 }
 
 function editTemplate(t) {
@@ -786,16 +801,16 @@ function editTemplate(t) {
       if (t) await api(`/report_templates?id=eq.${t.id}`, { method: "PATCH", body: JSON.stringify({ ...row, version: t.version + 1 }) });
       else await api("/report_templates", { method: "POST", body: JSON.stringify({ ...row, created_by: me.user_id }) });
       tab = "admin_templates"; render();
-    } catch (x) { err.textContent = /duplicate|unique/i.test(x.message) ? "Another template already uses this description." : x.message; }
-  } }, pageHead(t ? `Edit template - version ${t.version}` : "New report template",
-      "Reusable report definitions. Editing creates a new version; existing tasks keep their copy.",
-      h("button", { class: "primary", text: t ? "Save new version" : "Create template" }),
+    } catch (x) { err.textContent = /duplicate|unique/i.test(x.message) ? "Another static report already uses this description." : x.message; }
+  } }, pageHead(t ? `Edit static report - version ${t.version}` : "New static report",
+      "One SAP T-Code with its variant and date conditions. Editing creates a new version; existing tasks keep their copy.",
+      h("button", { class: "primary", text: t ? "Save new version" : "Create static report" }),
       h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() })),
     h("div", { class: "card" }, h("div", { class: "grid" }, field("Description", f.desc, "The report's name everywhere: task lists, history, e-mail subjects and workbook names."),
       field("T-Code", f.tcode), field("Variant", f.variant, "Layout and selections come from the SAP variant."),
       datesField, field("Date rule", f.rule), periodField,
       fromField, toField, patternField, field("Status", f.status)),
-    h("p", { class: "hint", text: "Editing a template does not change existing tasks: each task keeps the configuration it was saved with." })), err));
+    h("p", { class: "hint", text: "Editing a static report does not change existing tasks: each task keeps the configuration it was saved with." })), err));
   refresh();
 }
 
@@ -951,8 +966,9 @@ async function adminReleases() {
 }
 
 const ADMIN_TABS = ["Overview", ["admin_dashboard", "Dashboard", "Operational overview - cloud BAH."],
-  "Automation", ["admin_templates", "Report Templates", "Reusable report definitions. Editing creates a new version; existing tasks keep their copy."],
-  ["admin_tasks", "Tasks", "Standard and dynamic report tasks, schedules and employee assignments."],
+  "Automation", ["admin_templates", "Static Reports", "Single SAP report definitions: T-Code, variant and date conditions. Editing creates a new version; existing tasks keep their copy."],
+  ["admin_dynamic", "Dynamic Reports", "Multi-source report definitions such as LC Margin Held. Editing creates a new version; tasks choose when to use it."],
+  ["admin_tasks", "Tasks", "Schedules, assignees and e-mail for static and dynamic reports - managed separately per report type."],
   "People & access", ["admin_people", "Employees", "Accounts, invitations, registration, SAP user IDs and each employee's runner."],
   ["admin_invitations", "Invitations", "Pending, registered, expired and revoked invitations."],
   ["admin_credentials", "SAP Credentials", "Which employees have a usable SAP password saved for the shared runner (status only)."],

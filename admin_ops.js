@@ -300,10 +300,13 @@ async function adminAudit() {
 }
 
 // ------------------------------------------------------------------ Dynamic Reports (several SAP reports, matched on the runner)
-// A dynamic report is a task with report_kind 'dynamic': the same assignments, schedule, central scheduler opt-in,
-// Run Now, sealed SAP passwords and e-mail as any task. Its definition (task_configs.config.dynamic) is checked by the
-// database on save (bah.dynamic_config_problems) and again by the runner (1.1.0+) before any SAP contact. Scheduled
-// runs start only after an administrator opts the report in under Settings > Scheduled reports.
+// Same model as static reports. A dynamic report DEFINITION (bah.dynamic_reports: SAP sources, matching, output
+// columns) is managed under Administrator > Dynamic Reports and versioned; the TASKS that schedule it (schedule,
+// assignees, e-mail) are managed under Tasks and reference the definition (tasks.dynamic_report_id / _version). Each
+// task keeps its own copy of the definition in task_configs - runs read only that copy, so editing a definition
+// changes a task's runs only when that version is applied to the task. Definitions are checked by the database on
+// save (bah.dynamic_config_problems) and again by the runner (1.1.0+) before any SAP contact. Scheduled runs start
+// only after an administrator opts the task in under Settings > Scheduled reports.
 const DYN_TYPES = [["text", "Text"], ["date", "Date"], ["number", "Amount (number)"], ["integer", "Whole number"]];
 const dynSources = (c) => (((c || {}).dynamic || {}).sources || []);
 const dynSourceText = (c) => dynSources(c).map((s) => `${s.tcode}${s.variant ? ` (${s.variant})` : ""}`).join(" + ") || "—";
@@ -312,51 +315,54 @@ const reqToText = (req) => (req || []).map((r) => (typeof r === "string" ? r : [
 const textToReq = (t) => String(t || "").split(/\r?\n/).map((l) => l.split("|").map((x) => x.trim()).filter(Boolean)).filter((p) => p.length)
   .map(([name, ...aliases]) => (aliases.length ? { name, aliases } : name));
 const reqNames = (s) => textToReq(s.req.value).map((r) => (typeof r === "string" ? r : r.name));
+const dynName = (d) => (d && (d.description || d.name)) || "";
+// The configuration a task copies from a definition; the report name in e-mails / workbook names is the definition's.
+const dynConfigForTask = (d) => ({ ...(d.config || {}), report_name: dynName(d) });
+const dynBlankConfig = () => ({ report_kind: "dynamic", date_rule: "none", date_fields: [], output: { filename_pattern: "{ReportName}" },
+  dynamic: { version: 1, sources: [
+    { key: "src1", tcode: "", variant: "", role: "primary", row_key_column: "", required_columns: [] },
+    { key: "src2", tcode: "", variant: "", role: "lookup", row_key_column: "", required_columns: [] }],
+    extract: { name: "po", source: "src1", column: "", prefix: "", separator: "-", length: 10, missing_value: "Missing" },
+    match: { value: "po", lookup: "src2", column: "", length: 10, combine: "distinct_comma" },
+    aging: { column: "" }, columns: [], sort: [] } });
 
-async function editDynamic(id) {
-  const conn = (await api("/app_connections?select=id,code,display_name&status=eq.active"))[0];
-  if (!conn) { alert("No active SAP connection configured."); return; }
-  let t = { name: "", description: "", execution_target: "live_sap", execution_mode: "scheduled_and_manual", status: "active" };
-  let cfg = { report_kind: "dynamic", date_rule: "none", date_fields: [], output: { filename_pattern: "{ReportName}" },
-    dynamic: { version: 1, sources: [
-      { key: "src1", tcode: "", variant: "", role: "primary", row_key_column: "", required_columns: [] },
-      { key: "src2", tcode: "", variant: "", role: "lookup", row_key_column: "", required_columns: [] }],
-      extract: { name: "po", source: "src1", column: "", prefix: "", separator: "-", length: 10, missing_value: "Missing" },
-      match: { value: "po", lookup: "src2", column: "", length: 10, combine: "distinct_comma" },
-      aging: { column: "" }, columns: [], sort: [] } };
-  let em = { enabled: false, to: [], cc: [], bcc: [], subject: "", body: "", failure_subject: "", failure_body: "",
-             notify_success: true, notify_failure: false, delivery_format: "attachment" };
-  let sc = null, asg = [];
+async function adminDynamicReports() {
+  const [defs, tasks] = await Promise.all([
+    api("/dynamic_reports?select=id,name,description,version,status,config&order=name"),
+    api("/tasks?select=id,name,status,dynamic_report_id,dynamic_report_version&report_kind=eq.dynamic&order=name")]);
+  const usedBy = (d) => tasks.filter((t) => t.dynamic_report_id === d.id && visibleTask(t.id));
+  return { actions: [h("button", { class: "primary", text: "New dynamic report", onclick: () => editDynamicReport(null) })],
+    content: table([["Report", (d) => h("strong", { text: dynName(d) })],
+              ["SAP reports", (d) => dynSourceText(d.config)],
+              ["Output columns", (d) => String((((d.config || {}).dynamic || {}).columns || []).length)],
+              ["Version", (d) => String(d.version)],
+              ["Scheduled by (Tasks)", (d) => { const u = usedBy(d);
+                return u.length ? u.map((t) => `${t.name}${t.dynamic_report_version < d.version ? ` (uses version ${t.dynamic_report_version})` : ""}`).join(", ")
+                                : "Not scheduled yet"; }],
+              ["Status", (d) => badge(d.status)],
+              ["", (d) => h("div", { class: "actions" }, h("button", { class: "small", text: "Edit", onclick: () => editDynamicReport(d.id) }))]],
+             defs, "No dynamic reports yet - create the first one.") };
+}
+
+// ---- dynamic report DEFINITION editor (no schedule, assignees or e-mail: those belong to the task)
+async function editDynamicReport(id) {
+  let def = { name: "", description: "", status: "active", version: 0, config: dynBlankConfig() };
+  let users = [];
   if (id) {
-    t = (await api(`/tasks?select=*&id=eq.${id}`))[0];
-    const c = (await api(`/task_configs?select=config,email&task_id=eq.${id}`))[0];
-    if (c) { cfg = c.config; em = { ...em, ...c.email }; }
-    sc = (await api(`/schedules?select=*&task_id=eq.${id}`))[0] || null;
-    asg = await api(`/assignments?select=id,employee_id,status&task_id=eq.${id}`);
+    def = (await api(`/dynamic_reports?select=*&id=eq.${id}`))[0];
+    users = (await api(`/tasks?select=id,name,dynamic_report_version&dynamic_report_id=eq.${id}&order=name`));
   }
-  const d = cfg.dynamic;
+  const cfg = def.config, d = cfg.dynamic;
   const f = {
-    name: inp(t.name, { maxlength: "120", required: true, placeholder: "e.g. LC Margin Held" }),
-    desc: inp(t.description || cfg.report_name || "", { maxlength: "120", required: true, placeholder: "Report name used in e-mails and file names" }),
-    mode: sel(t.execution_mode, [["scheduled_and_manual", "Scheduled and manual"], ["manual_only", "Manual Run Now only"], ["scheduled_only", "Scheduled only"]]),
-    status: sel(t.status, [["active", "Active"], ["inactive", "Inactive"], ...(t.status === "paused" ? [["paused", "Paused"]] : [])]),
-    freq: sel(sc && sc.status !== "inactive" ? sc.frequency : "", [["", "No schedule (manual only)"], ["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]]),
-    time: inp(sc ? sc.run_time.slice(0, 5) : "10:30", { type: "time" }),
-    weekday: sel(sc && sc.weekday ? String(sc.weekday) : "2", [["1", "Monday"], ["2", "Tuesday"], ["3", "Wednesday"], ["4", "Thursday"], ["5", "Friday"], ["6", "Saturday"], ["7", "Sunday"]]),
-    mday: inp(sc && sc.month_day ? sc.month_day : 1, { type: "number", min: "1", max: "31" }),
-    eon: chk(em.enabled), esub: inp(em.subject, { maxlength: "200", class: "wide", placeholder: "e.g. {report_name} - {execution_date}" }),
-    ebody: h("textarea", { class: "email-body", rows: "6" }),
-    efmt: sel(em.delivery_format, [["attachment", "Excel attachment only"], ["body", "Data table in the e-mail body only"], ["both", "Data table and Excel attachment"]]),
-    nsucc: chk(em.notify_success), nfail: chk(em.notify_failure),
-    // matching and transformation
+    desc: inp(dynName(def), { maxlength: "120", required: true, placeholder: "e.g. LC Margin Held" }),
+    status: sel(def.status, [["active", "Active"], ["inactive", "Inactive"]]),
+    apply: chk(true),
     xname: inp(d.extract.name, { maxlength: "20" }), xcol: inp(d.extract.column, { maxlength: "80" }),
     xprefix: inp(d.extract.prefix, { maxlength: "10", placeholder: "e.g. 32" }), xsep: inp(d.extract.separator, { maxlength: "3" }),
     xlen: inp(d.extract.length, { type: "number", min: "4", max: "20" }), xmiss: inp(d.extract.missing_value, { maxlength: "20" }),
     mlookup: inp(d.match.lookup, { maxlength: "20" }), mcol: inp(d.match.column, { maxlength: "80" }),
     agecol: inp(d.aging.column, { maxlength: "80" }),
   };
-  f.ebody.value = em.body || "";
-  const rTo = emailChips((em.to || []), "name@company.com"), rCc = emailChips(em.cc || [], "Add CC"), rBcc = emailChips(em.bcc || [], "Add BCC");
 
   // ---- SAP source reports (first = primary: one output row per row; the others are lookups)
   const srcBox = h("div", {});
@@ -424,18 +430,6 @@ async function editDynamic(id) {
   const refresh = h("button", { type: "button", class: "secondary", text: "Refresh column choices", onclick: drawOut });
   const addOutBtn = h("button", { type: "button", class: "secondary", text: "Add output column", onclick: () => { addOut({ heading: "", value: "", type: "text" }); drawOut(); } });
 
-  // ---- schedule fields shown for the chosen frequency
-  const sWeek = field("Weekday", f.weekday), sMday = field("Day of month", f.mday);
-  const syncSched = () => { sWeek.hidden = f.freq.value !== "weekly"; sMday.hidden = f.freq.value !== "monthly"; };
-  f.freq.addEventListener("change", syncSched); syncSched();
-
-  let assignBoxes = [];
-  const save = h("button", { class: "primary", text: id ? "Save changes" : "Create dynamic report" });
-  const picker = employeePicker({
-    load: async () => (await api("/profiles?select=id,full_name,email,role,status&order=full_name")).filter((p) => p.status === "active")
-      .map((p) => { const a = asg.find((x) => x.employee_id === p.id); return { p, a, box: { checked: !!(a && a.status === "active") } }; }),
-    onLoaded: (entries) => { assignBoxes = entries; save.disabled = false; }, onChange: () => {} });
-
   const build = () => {
     const srcs = sources.map((x, i) => ({ key: x.key.value.trim(), tcode: x.tcode.value.trim().toUpperCase(), variant: x.variant.value.trim(),
       role: i === 0 ? "primary" : "lookup", row_key_column: x.rowkey.value.trim(), required_columns: textToReq(x.req.value) }));
@@ -457,18 +451,135 @@ async function editDynamic(id) {
     h("summary", { text: "Definition as saved (read-only)" }), preview);
 
   const err = h("div", { class: "err" });
+  const save = h("button", { class: "primary", text: id ? "Save new version" : "Create dynamic report" });
+  const applyRow = users.length ? h("div", { class: "span-2" },
+    field(`Apply this version to the ${users.length} task(s) that schedule this report now (${users.map((u) => u.name).join(", ")})`, f.apply,
+          "Ticked: their next runs use this version. Unticked: each task keeps its current copy until you choose the new version in the task.")) : null;
   const form = h("form", { class: "task-form", onsubmit: async (e) => {
     e.preventDefault(); err.textContent = ""; save.disabled = true;
     try {
-      if (!f.name.value.trim() || !f.desc.value.trim()) throw new Error("Task name and report name are required.");
-      const to = rTo.values(), cc = rCc.values(), bcc = rBcc.values();
-      if (rTo.pendingInvalid() || rCc.pendingInvalid() || rBcc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
-      if (f.eon.checked && !to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
+      const desc = f.desc.value.trim();
+      if (!desc) throw new Error("Report name is required.");
       const config = build();
       const problems = await api("/rpc/dynamic_config_problems", { method: "POST", body: JSON.stringify({ p_config: config }) });
       if (problems && problems.length) throw new Error("Please correct the definition: " + problems.join("; "));
-      const row = { name: f.name.value.trim(), description: f.desc.value.trim(), connection_id: conn.id, execution_target: "live_sap",
-                    execution_mode: f.mode.value, status: f.status.value, template_id: null, template_version: null };
+      const row = { name: desc, description: desc, config, status: f.status.value };
+      const saved = id
+        ? (await api(`/dynamic_reports?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ ...row, version: def.version + 1 }), headers: { prefer: "return=representation" } }))[0]
+        : (await api("/dynamic_reports", { method: "POST", body: JSON.stringify({ ...row, created_by: me.user_id }), headers: { prefer: "return=representation" } }))[0];
+      // Only when asked: copy the new version into the tasks that schedule this report (their schedules, assignees
+      // and e-mail settings are not touched).
+      if (id && users.length && f.apply.checked) {
+        for (const u of users) {
+          await api(`/task_configs?task_id=eq.${u.id}`, { method: "PATCH", body: JSON.stringify({ config: dynConfigForTask(saved) }) });
+          await api(`/tasks?id=eq.${u.id}`, { method: "PATCH", body: JSON.stringify({ description: dynName(saved), dynamic_report_version: saved.version }) });
+        }
+      }
+      tab = "admin_dynamic"; render();
+    } catch (x) { err.textContent = /duplicate|unique/i.test(x.message) ? "Another dynamic report already uses this name." : x.message; }
+    finally { save.disabled = false; }
+  } },
+    pageHead(id ? `Edit dynamic report - version ${def.version}` : "New dynamic report",
+      "Several SAP reports, matched and transformed on the shared BAH runner. Schedules, assignees and e-mail are set under Tasks."),
+    h("section", { class: "card form-card" }, h("h2", { text: "1. Report details" }),
+      h("div", { class: "grid-2" }, field("Report name", f.desc, "Shown in task lists, e-mails ({report_name}) and the workbook name."),
+        field("Status", f.status), applyRow)),
+    h("section", { class: "card form-card" }, h("h2", { text: "2. SAP source reports" }), srcBox, h("div", { class: "actions" }, addSrcBtn)),
+    h("section", { class: "card form-card" }, h("h2", { text: "3. Matching and transformation" }),
+      h("p", { class: "hint", text: "The value is taken from a text column of the primary report: <prefix><separator><digits> becomes the prefix followed by the digits padded with zeros to the full length (32-4062 -> 3200004062). " +
+        "Rows without it are kept and show the 'missing' text. Every primary row stays a separate output row; several lookup rows for one value are combined into one cell (distinct values, comma-separated)." }),
+      h("div", { class: "grid-3" }, field("Value name", f.xname), field("Text column (primary report)", f.xcol), field("Prefix", f.xprefix),
+        field("Separator", f.xsep), field("Full length (digits)", f.xlen), field("Shown when not found", f.xmiss),
+        field("Lookup source key", f.mlookup), field("Lookup column with the same value", f.mcol), field("Aging date column (primary report)", f.agecol, "Aging = execution date minus this date, in days"))),
+    h("section", { class: "card form-card" }, h("h2", { text: "4. Output columns (in this order)" }),
+      h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Heading", "Value", "Type", ""].map((x) => h("th", { text: x })))), outBody)),
+      h("div", { class: "actions" }, addOutBtn, refresh),
+      h("div", { class: "grid-2" }, field("Sort by", f.sortcol), field("Direction", f.sortdir)), showJson),
+    err,
+    h("div", { class: "sticky-actions" }, h("span", { class: "hint", text: id ? "Saving creates a new version of this report." : "" }),
+      h("div", { class: "actions" }, h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => { tab = "admin_dynamic"; render(); } }), save)));
+  mainArea().replaceChildren(form);
+}
+
+// ---- dynamic report TASK editor (Tasks tab): which dynamic report, its schedule, assignees and e-mail
+async function editDynamicTask(id) {
+  const conn = (await api("/app_connections?select=id,code,display_name&status=eq.active"))[0];
+  if (!conn) { alert("No active SAP connection configured."); return; }
+  let t = { name: "", description: "", execution_target: "live_sap", execution_mode: "scheduled_and_manual", status: "active",
+            dynamic_report_id: null, dynamic_report_version: null };
+  let cfg = null;                                   // the task's OWN saved copy of the definition (what runs use)
+  let em = { enabled: false, to: [], cc: [], bcc: [], subject: "", body: "", failure_subject: "", failure_body: "",
+             notify_success: true, notify_failure: false, delivery_format: "attachment" };
+  let sc = null, asg = [];
+  const defs = await api("/dynamic_reports?select=id,name,description,version,status,config&order=name");
+  if (id) {
+    t = (await api(`/tasks?select=*&id=eq.${id}`))[0];
+    const c = (await api(`/task_configs?select=config,email&task_id=eq.${id}`))[0];
+    if (c) { cfg = c.config || null; em = { ...em, ...c.email }; }
+    sc = (await api(`/schedules?select=*&task_id=eq.${id}`))[0] || null;
+    asg = await api(`/assignments?select=id,employee_id,status&task_id=eq.${id}`);
+  }
+  const choosable = defs.filter((x) => x.status === "active" || x.id === t.dynamic_report_id);
+  const current = defs.find((x) => x.id === t.dynamic_report_id);
+  const f = {
+    name: inp(t.name, { maxlength: "120", required: true, placeholder: "e.g. LC Margin Held - weekly" }),
+    def: sel(t.dynamic_report_id || "", [["", id && cfg ? `— ${t.description || "saved definition"} (not linked) —` : "— choose a dynamic report —"],
+                                         ...choosable.map((x) => [x.id, `${dynName(x)}${x.status === "active" ? "" : " (inactive)"}`])]),
+    upgrade: chk(false),
+    mode: sel(t.execution_mode, [["scheduled_and_manual", "Scheduled and manual"], ["manual_only", "Manual Run Now only"], ["scheduled_only", "Scheduled only"]]),
+    status: sel(t.status, [["active", "Active"], ["inactive", "Inactive"], ...(t.status === "paused" ? [["paused", "Paused"]] : [])]),
+    freq: sel(sc && sc.status !== "inactive" ? sc.frequency : "", [["", "No schedule (manual only)"], ["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]]),
+    time: inp(sc ? sc.run_time.slice(0, 5) : "10:30", { type: "time" }),
+    weekday: sel(sc && sc.weekday ? String(sc.weekday) : "2", [["1", "Monday"], ["2", "Tuesday"], ["3", "Wednesday"], ["4", "Thursday"], ["5", "Friday"], ["6", "Saturday"], ["7", "Sunday"]]),
+    mday: inp(sc && sc.month_day ? sc.month_day : 1, { type: "number", min: "1", max: "31" }),
+    eon: chk(em.enabled), esub: inp(em.subject, { maxlength: "200", class: "wide", placeholder: "e.g. {report_name} - {execution_date}" }),
+    ebody: h("textarea", { class: "email-body", rows: "6" }),
+    efmt: sel(em.delivery_format, [["attachment", "Excel attachment only"], ["body", "Data table in the e-mail body only"], ["both", "Data table and Excel attachment"]]),
+    nsucc: chk(em.notify_success), nfail: chk(em.notify_failure),
+  };
+  f.ebody.value = em.body || "";
+  const rTo = emailChips((em.to || []), "name@company.com"), rCc = emailChips(em.cc || [], "Add CC"), rBcc = emailChips(em.bcc || [], "Add BCC");
+  // A definition chosen in this edit (or "use the latest version") is copied into the task on save; otherwise the
+  // task keeps its own saved copy - exactly like static report templates.
+  const pendingDef = () => { const x = defs.find((y) => y.id === f.def.value);
+    return x && (x.id !== t.dynamic_report_id || f.upgrade.checked) ? x : null; };
+  const defInfo = h("p", { class: "hint" });
+  const syncDef = () => { const x = defs.find((y) => y.id === f.def.value);
+    defInfo.textContent = x ? `SAP reports: ${dynSourceText(x.config)} - ${(((x.config || {}).dynamic || {}).columns || []).length} output columns. ` +
+                              "The definition itself is edited under Dynamic Reports." : ""; };
+  f.def.addEventListener("change", () => { f.upgrade.checked = false; syncDef(); });
+  syncDef();
+  const upgradeRow = current && t.dynamic_report_version && current.version > t.dynamic_report_version
+    ? h("div", { class: "span-2" }, field(`Use the report's latest version (${current.version}); this task runs version ${t.dynamic_report_version} until ticked`, f.upgrade)) : null;
+
+  const sWeek = field("Weekday", f.weekday), sMday = field("Day of month", f.mday);
+  const syncSched = () => { sWeek.hidden = f.freq.value !== "weekly"; sMday.hidden = f.freq.value !== "monthly"; };
+  f.freq.addEventListener("change", syncSched); syncSched();
+
+  let assignBoxes = [];
+  const save = h("button", { class: "primary", text: id ? "Save changes" : "Create task" });
+  const picker = employeePicker({
+    load: async () => (await api("/profiles?select=id,full_name,email,role,status&order=full_name")).filter((p) => p.status === "active")
+      .map((p) => { const a = asg.find((x) => x.employee_id === p.id); return { p, a, box: { checked: !!(a && a.status === "active") } }; }),
+    onLoaded: (entries) => { assignBoxes = entries; save.disabled = false; }, onChange: () => {} });
+
+  const err = h("div", { class: "err" });
+  const form = h("form", { class: "task-form", onsubmit: async (e) => {
+    e.preventDefault(); err.textContent = ""; save.disabled = true;
+    try {
+      if (!f.name.value.trim()) throw new Error("Task name is required.");
+      const pend = pendingDef();
+      const config = pend ? dynConfigForTask(pend) : cfg;
+      if (!config) throw new Error("Choose a dynamic report.");
+      const to = rTo.values(), cc = rCc.values(), bcc = rBcc.values();
+      if (rTo.pendingInvalid() || rCc.pendingInvalid() || rBcc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
+      if (f.eon.checked && !to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
+      const keep = !pend && f.def.value === (t.dynamic_report_id || "");
+      const row = { name: f.name.value.trim(), description: pend ? dynName(pend) : (config.report_name || t.description || null),
+                    connection_id: conn.id, execution_target: "live_sap", execution_mode: f.mode.value, status: f.status.value,
+                    template_id: null, template_version: null,
+                    dynamic_report_id: pend ? pend.id : keep ? (t.dynamic_report_id || null) : null,
+                    dynamic_report_version: pend ? pend.version : keep ? (t.dynamic_report_version || null) : null };
       const saved = id ? (await api(`/tasks?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(row), headers: { prefer: "return=representation" } }))[0]
                        : (await api("/tasks", { method: "POST", body: JSON.stringify({ ...row, report_kind: "dynamic", created_by: me.user_id }), headers: { prefer: "return=representation" } }))[0];
       const tid = saved.id;
@@ -490,27 +601,17 @@ async function editDynamic(id) {
       tab = "admin_tasks"; render();
     } catch (x) { err.textContent = x.message; } finally { save.disabled = false; }
   } },
-    pageHead(id ? `Edit dynamic report: ${t.name}` : "New dynamic report", "Several SAP reports, matched and transformed on the shared BAH runner."),
-    h("section", { class: "card form-card" }, h("h2", { text: "1. Report details" }),
-      h("div", { class: "grid-2" }, field("Task name", f.name), field("Report name", f.desc, "Shown in e-mails ({report_name}) and the workbook name."),
-        field("Execution mode", f.mode), field("Status", f.status))),
-    h("section", { class: "card form-card" }, h("h2", { text: "2. SAP source reports" }), srcBox, h("div", { class: "actions" }, addSrcBtn)),
-    h("section", { class: "card form-card" }, h("h2", { text: "3. Matching and transformation" }),
-      h("p", { class: "hint", text: "The value is taken from a text column of the primary report: <prefix><separator><digits> becomes the prefix followed by the digits padded with zeros to the full length (32-4062 -> 3200004062). " +
-        "Rows without it are kept and show the 'missing' text. Every primary row stays a separate output row; several lookup rows for one value are combined into one cell (distinct values, comma-separated)." }),
-      h("div", { class: "grid-3" }, field("Value name", f.xname), field("Text column (primary report)", f.xcol), field("Prefix", f.xprefix),
-        field("Separator", f.xsep), field("Full length (digits)", f.xlen), field("Shown when not found", f.xmiss),
-        field("Lookup source key", f.mlookup), field("Lookup column with the same value", f.mcol), field("Aging date column (primary report)", f.agecol, "Aging = execution date minus this date, in days"))),
-    h("section", { class: "card form-card" }, h("h2", { text: "4. Output columns (in this order)" }),
-      h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Heading", "Value", "Type", ""].map((x) => h("th", { text: x })))), outBody)),
-      h("div", { class: "actions" }, addOutBtn, refresh),
-      h("div", { class: "grid-2" }, field("Sort by", f.sortcol), field("Direction", f.sortdir)), showJson),
-    h("section", { class: "card form-card" }, h("h2", { text: "5. Schedule" }),
+    pageHead(id ? `Edit dynamic report task: ${t.name}` : "New dynamic report task", "Schedule, assignees and e-mail for a dynamic report."),
+    h("section", { class: "card form-card" }, h("h2", { text: "1. Task details" }),
+      h("div", { class: "grid-2" }, field("Task name", f.name, "Your own name for this task."),
+        field("Dynamic report", f.def, "From Dynamic Reports. The task keeps a copy of the chosen version."),
+        field("Execution mode", f.mode), field("Status", f.status), upgradeRow), defInfo),
+    h("section", { class: "card form-card" }, h("h2", { text: "2. Schedule" }),
       h("div", { class: "grid-3" }, field("Frequency", f.freq), field("Time (Asia/Karachi)", f.time), sWeek, sMday),
-      h("p", { class: "hint", text: "Runs on the shared BAH runner. Scheduled runs start only after an administrator opts this report in under Settings > Scheduled reports; until then only Run Now works." })),
-    h("section", { class: "card form-card" }, h("h2", { text: "6. Assigned employees" }), picker.el,
+      h("p", { class: "hint", text: "Runs on the shared BAH runner. Scheduled runs start only after an administrator opts this task in under Settings > Scheduled reports; until then only Run Now works." })),
+    h("section", { class: "card form-card" }, h("h2", { text: "3. Assigned employees" }), picker.el,
       h("p", { class: "hint", text: "SAP is accessed with the run owner's own saved SAP password; each source report uses the same SAP user." })),
-    h("section", { class: "card form-card" }, h("div", { class: "card-head" }, h("h2", { text: "7. E-mail" }), h("label", { class: "toggle" }, f.eon, " Send report e-mail")),
+    h("section", { class: "card form-card" }, h("div", { class: "card-head" }, h("h2", { text: "4. E-mail" }), h("label", { class: "toggle" }, f.eon, " Send report e-mail")),
       h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el), field("BCC", rBcc.el)),
       h("div", { class: "grid-2" }, field("Delivery format", f.efmt), h("div", {})), field("Subject", f.esub),
       h("label", { class: "field" }, "Body", placeholderBar(f.ebody), f.ebody),
@@ -524,5 +625,5 @@ async function editDynamic(id) {
   picker.start();
 }
 
-Object.assign(ADMIN_VIEWS, { admin_people: adminPeopleV2, admin_invitations: adminInvitations, admin_credentials: adminCredentials,
+Object.assign(ADMIN_VIEWS, { admin_dynamic: adminDynamicReports, admin_people: adminPeopleV2, admin_invitations: adminInvitations, admin_credentials: adminCredentials,
   admin_vms: adminVms, admin_system: adminSystemJobs, admin_audit: adminAudit });
