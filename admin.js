@@ -803,12 +803,101 @@ function editTemplate(t) {
 // The central (shared) BAH runner and the runner releases on one page. Employee machines are not monitored here.
 // Packages are published by the release process (one-time uploader + checksum check), not from the browser, so
 // there is no upload, download or retire button; release records and their status steps are unchanged.
+// ------------------------------------------------------------------ Activate New Runner (one button)
+// The database decides everything (bah.admin_request_activation): Stable release with a confirmed checksum,
+// newer than the running version, central runner online and idle, runner 1.1.5+, one activation at a time. The
+// runner carries it out and reports every step; success = the runner checked in with the new version.
+const ACT_OPEN = ["requested", "in_progress"];
+const ACT_STEP = { requested: "Requested - waiting for the runner's next check-in", acknowledged: "Runner acknowledged; updater starting",
+  downloading: "Downloading the package", package_verified: "Package size, SHA-256 and manifest verified",
+  preparing: "Preparing the new version", stopping_runner: "Stopping the current runner", switched: "New version installed",
+  starting: "Starting the new runner", verifying: "Waiting for the new runner to check in", verified: "Verified: the new version checked in",
+  rolling_back: "Rolling back to the previous version", rolled_back: "Rolled back - previous version running",
+  failed: "Failed - previous version running", timed_out: "No progress for 30 minutes", cancelled: "Cancelled" };
+const actBadge = (st) => h("span", { class: `badge ${{ succeeded: "ok", failed: "bad", rolled_back: "bad", cancelled: "", requested: "info", in_progress: "warn" }[st] || ""}`,
+                                     text: st.replace("_", " ") });
+function activationProgress(a) {
+  const steps = Array.isArray(a.steps) ? a.steps : [];
+  return h("div", {},
+    h("p", {}, actBadge(a.status), " ", h("strong", { text: `${a.from_version || "?"} → ${a.target_version}` }),
+      " ", h("span", { class: "muted", text: `requested ${fmt(a.requested_at)}${a.finished_at ? ` · finished ${fmt(a.finished_at)}` : ""}` })),
+    a.detail ? h("p", { class: ACT_OPEN.includes(a.status) ? "hint" : (a.status === "succeeded" ? "hint" : "err"), text: a.detail }) : null,
+    h("ol", { class: "steps" }, ...steps.map((x) => h("li", {}, h("span", { class: "muted", text: `${fmt(x.at)} ` }),
+      ACT_STEP[x.step] || x.step, x.detail ? h("span", { class: "muted", text: ` - ${x.detail}` }) : null))));
+}
+function activationCard(central, rels, stable, acts, minRunner) {
+  const card = h("div", { class: "card" }, h("h2", { text: "Activate New Runner" }));
+  if (acts === null) {
+    card.append(h("p", { class: "hint", text: "One-button activation becomes available after its database update." }));
+    return card;
+  }
+  const c = central.length === 1 ? central[0] : null;
+  const ver = (v) => String(v || "").replace(/^cloud-/, "");
+  const min = minRunner || "1.1.5";
+  const newer = rels.filter((r) => r.status === "stable" && r.checksum_verified_at && (!c || vcmp(r.version, ver(c.version)) > 0))
+                    .sort((a, b) => vcmp(b.version, a.version));
+  const open = acts.find((a) => ACT_OPEN.includes(a.status)) || null;
+  const pick = h("select", {}, ...newer.map((r) => h("option", { value: r.id, text: `${r.version}${r === newer[0] ? " (latest Stable)" : ""}` })));
+  const why = !c ? (central.length ? "more than one central runner is registered" : "no central runner is registered")
+    : open ? "an activation is in progress"
+    : !isOnline(c.last_seen_at) ? "the central runner is offline"
+    : c.busy ? "the central runner is running a report - try again when it is idle"
+    : vcmp(ver(c.version), min) < 0 ? `runner ${ver(c.version)} cannot receive an activation: install ${min} once with Update BAH Runner on the VM`
+    : !newer.length ? `no Stable release newer than ${ver(c.version)}`
+    : "";
+  const btn = h("button", { class: "primary", text: "Activate New Runner", disabled: !!why, onclick: async () => {
+    const rel = newer.find((r) => r.id === pick.value);
+    if (!rel || !confirm(`Activate BAH Runner ${rel.version} on ${c.name} (now ${ver(c.version)})?\n\n` +
+        "The runner checks the package (size, SHA-256, manifest), stops the current runner after any report in progress, " +
+        "installs and starts the new version and waits for it to check in.\n\nIf any step fails, the previous version " +
+        `${ver(c.version)} is restored and started again. Nobody needs to sign in to the VM.`)) return;
+    btn.disabled = true;
+    try { await rpc("admin_request_activation", { p_release: rel.id }); render(); }
+    catch (x) { alert(x.message); btn.disabled = false; }
+  } });
+  card.append(h("p", { class: "hint", text: `Central runner ${c ? `${c.name} - running ${ver(c.version) || "?"}` : "-"}. ` +
+      "Activation is carried out by the runner itself; success is confirmed only when it checks in with the new version." }),
+    h("div", { class: "actions" }, newer.length ? h("label", { class: "field" }, "Version ", pick) : null, btn),
+    why ? h("p", { class: "muted", text: `Not available: ${why}.` }) : null);
+  const live = h("div", {});
+  const show = (a) => live.replaceChildren(h("h3", { text: ACT_OPEN.includes(a.status) ? "Activation in progress" : "Last activation" }),
+    activationProgress(a),
+    a.status === "requested" ? h("button", { class: "secondary small", text: "Cancel", onclick: async () => {
+      if (!confirm("Cancel this activation? The runner has not started it yet.")) return;
+      try { await rpc("admin_cancel_activation", { p_activation: a.id }); render(); } catch (x) { alert(x.message); } } }) : null);
+  const latest = open || acts[0] || null;
+  if (latest) show(latest);
+  card.append(live);
+  if (open) {                                   // follow it live until it finishes (stops when the page is left)
+    const poll = async () => {
+      if (!live.isConnected) return;
+      try {
+        const a = (await api(`/runner_activations?select=*&id=eq.${open.id}`))[0];
+        if (!a) return;
+        if (!ACT_OPEN.includes(a.status)) { render(); return; }
+        show(a);
+      } catch (x) { /* keep the last view; try again */ }
+      setTimeout(poll, 3000);
+    };
+    setTimeout(poll, 3000);
+  }
+  if (acts.length > 1) {
+    card.append(h("h3", { text: "Recent activations" }),
+      ...table([["Requested", (a) => fmt(a.requested_at)], ["Versions", (a) => `${a.from_version || "?"} → ${a.target_version}`],
+                ["Result", (a) => actBadge(a.status)], ["Detail", (a) => h("div", { class: "muted", text: a.detail || "—" })]],
+               acts.slice(0, 5), "None"));
+  }
+  return card;
+}
+
 async function adminReleases() {
   const since = new Date(Date.now() - 86400000).toISOString();
-  const [rels, central, execs] = await Promise.all([
+  const [rels, central, execs, acts, minRunner] = await Promise.all([
     api("/runner_releases?select=*&order=created_at.desc"),
     api("/runners?select=id,name,mode,status,version,busy,live_permitted,last_seen_at&status=eq.active&mode=eq.shared&order=name"),
-    api(`/executions?select=runner_id,status,finished_at,error_class&finished_at=gte.${since}&order=finished_at.desc&limit=500`)]);
+    api(`/executions?select=runner_id,status,finished_at,error_class&finished_at=gte.${since}&order=finished_at.desc&limit=500`),
+    api("/runner_activations?select=*&order=requested_at.desc&limit=5").catch(() => null),     // null: not available yet
+    optionalRpc("activation_min_runner", {}, null)]);
   const stable = rels.filter((r) => r.status === "stable").sort((a, b) => vcmp(b.version, a.version))[0] || null;
   const ver = (v) => String(v || "—").replace(/^cloud-/, "");
   const setStatus = async (r, status) => {
@@ -847,8 +936,8 @@ async function adminReleases() {
   return [
     ...(central.length ? central.map(runnerCard)
       : [h("div", { class: "notice warn", text: "No central (shared) BAH runner is registered. See VM Management." })]),
-    h("div", { class: "notice", text: stable ? `Latest Stable release: ${stable.version}. A new version is installed on the VM with Update BAH Runner.`
-                                             : "No Stable release yet." }),
+    activationCard(central, rels, stable, acts, minRunner),
+    h("div", { class: "notice", text: stable ? `Latest Stable release: ${stable.version}.` : "No Stable release yet." }),
     h("div", { class: "card" }, h("h2", { text: "Releases" }),
       ...table([["Version", (r) => h("div", {}, h("strong", { text: r.version }),
                    runningOn(r).length ? h("div", {}, h("span", { class: "badge ok", text: "active on the central runner" })) : null)],
