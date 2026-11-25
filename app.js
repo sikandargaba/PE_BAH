@@ -392,7 +392,9 @@ async function taskDetail(t) {
 async function employeeDashboard() {
   const since = new Date(Date.now() - 7 * 86400000).toISOString();
   const [tasks, occ, mails, runners, latestRows, creds] = await Promise.all([
-    api("/tasks?select=id,status"), api(`/occurrences?select=status,kind,due_at,tasks(name,description),executions(attempt_no,error_class,error_detail)&due_at=gte.${since}&order=due_at.desc&limit=200`),
+    api("/tasks?select=id,status").then((r) => r.filter((t) => visibleTask(t.id))),
+    api(`/occurrences?select=task_id,status,kind,due_at,tasks(name,description),executions(attempt_no,error_class,error_detail)&due_at=gte.${since}&order=due_at.desc&limit=200`)
+      .then((r) => r.filter((o) => visibleTask(o.task_id))),
     api(`/notifications?select=status&created_at=gte.${since}`),
     api(`/runners?select=name,version,last_seen_at&status=eq.active&employee_id=eq.${me.user_id}`),
     api("/rpc/release_latest_stable", { method: "POST", body: "{}" }).catch(() => []),
@@ -501,7 +503,8 @@ const VIEWS = {
   runner: runnerPage,
   async tasks() {
     const [rows, runners, open, creds] = await Promise.all([
-      api("/tasks?select=id,name,description,execution_target,execution_mode,status,schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status)&order=name"),
+      api("/tasks?select=id,name,description,execution_target,execution_mode,status,schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status)&order=name")
+        .then((r) => r.filter((t) => visibleTask(t.id))),
       api(`/runners?select=name,last_seen_at,live_permitted&status=eq.active&employee_id=eq.${me.user_id}`),
       api(`/occurrences?select=id,task_id,status&employee_id=eq.${me.user_id}&status=in.(pending,claimed,waiting_retry)&order=created_at.desc`),
       myCredentialRows().catch(() => null)]);

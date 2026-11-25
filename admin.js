@@ -26,8 +26,10 @@ const SYNC_NOTE = "Synchronised from the local BAH: description, execution mode,
 async function adminDashboard() {
   const since = new Date(Date.now() - 7 * 86400000).toISOString();
   const [people, tasks, runners, occ, mails] = await Promise.all([
-    api("/profiles?select=status"), api("/tasks?select=status,execution_target"), api("/runners?select=status,last_seen_at"),
-    api(`/occurrences?select=status,kind,due_at,tasks(name,description),executions(status,finished_at,row_count)&due_at=gte.${since}&order=due_at.desc&limit=200`),
+    api("/profiles?select=status"), api("/tasks?select=id,status,execution_target").then((r) => r.filter((t) => visibleTask(t.id))),
+    api("/runners?select=status,last_seen_at"),
+    api(`/occurrences?select=task_id,status,kind,due_at,tasks(name,description),executions(status,finished_at,row_count)&due_at=gte.${since}&order=due_at.desc&limit=200`)
+      .then((r) => r.filter((o) => visibleTask(o.task_id))),
     api(`/notifications?select=status,created_at&created_at=gte.${since}`)]);
   const n = (rows, f) => rows.filter(f).length;
   const kpi = (label, value, cls = "") => h("div", { class: `kpi ${cls}` }, h("div", { class: "label", text: label }), h("div", { class: "value", text: String(value) }));
@@ -73,6 +75,13 @@ const HIDDEN_ADMIN_TASK_IDS = new Set([
   "df822662-5475-481c-b7d2-937b026982a9",   // TEST cloud runner (synthetic) / "End-to-end test - no SAP, no e-mail"
   "7c1a6874-e0ba-45e7-8b76-98e031392ff8",   // mb51 test
 ]);
+// Reports hidden from EVERY user-facing list: dashboards (admin and employee), the Scheduled reports card and the
+// employee "My reports" list with Run Now (by task id, never by text). The records, their manual-only setting and
+// their run history are untouched; past runs stay visible under Runs. mb51 test only (25-Nov-2026).
+const HIDDEN_TASK_IDS = new Set([
+  "7c1a6874-e0ba-45e7-8b76-98e031392ff8",   // mb51 test (manual only, never scheduled)
+]);
+const visibleTask = (id) => !HIDDEN_TASK_IDS.has(id);
 
 async function adminTasks() {
   const [allTasks, people] = await Promise.all([
@@ -646,7 +655,7 @@ function schedulerCard(st) {
               ["Schedule", (t) => scheduleText(t.schedule)],
               ["Assignees ready", (t) => `${t.assignees_ready} / ${t.assignees}`],
               ["On schedule", (t) => h("div", {}, badge(t.enabled ? "on" : "off"), t.since ? h("div", { class: "muted", text: `since ${fmt(t.since)}` }) : null)],
-              ["", toggleTask]], st.tasks || [], "No live report with a schedule."));
+              ["", toggleTask]], (st.tasks || []).filter((t) => visibleTask(t.task_id)), "No live report with a schedule."));
 }
 
 async function adminSettings() {
