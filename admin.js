@@ -83,24 +83,36 @@ const HIDDEN_TASK_IDS = new Set([
 ]);
 const visibleTask = (id) => !HIDDEN_TASK_IDS.has(id);
 
+// Standard and dynamic (multi-source) reports in ONE list, tagged by kind. Each kind keeps its own editor; Run Now,
+// schedules, assignments and run history work the same for both.
+const reportKindTag = (t) => h("span", { class: `badge ${t.report_kind === "dynamic" ? "info" : ""}`,
+                                         text: t.report_kind === "dynamic" ? "dynamic" : "standard" });
+const editReport = (t) => t.report_kind === "dynamic" ? editDynamic(t.id) : editTask(t.id);
 async function adminTasks() {
   const [allTasks, people] = await Promise.all([
-    api("/tasks?select=id,name,description,execution_target,execution_mode,status,report_kind,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&order=name"),
+    api("/tasks?select=id,name,description,execution_target,execution_mode,status,report_kind,scheduled_live_enabled,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&order=name"),
     api("/profiles?select=id,full_name,email,role,status&order=full_name")]);
-  // dynamic (multi-source) reports have their own section (Dynamic Reports) and are not listed here
-  const tasks = allTasks.filter((t) => !HIDDEN_ADMIN_TASK_IDS.has(t.id) && t.report_kind !== "dynamic");
+  const tasks = allTasks.filter((t) => !HIDDEN_ADMIN_TASK_IDS.has(t.id));
   const name = (id) => (people.find((p) => p.id === id) || {}).full_name || "?";
-  return { actions: [h("button", { class: "primary", text: "New task", onclick: () => editTask(null) })],
+  const sapText = (t) => t.report_kind === "dynamic" ? dynSourceText((t.task_configs || {}).config)
+                                                     : ((t.task_configs || {}).config || {}).tcode || "—";
+  const firstSchedule = (t) => Array.isArray(t.schedules) ? t.schedules[0] : t.schedules;
+  const onSchedule = (t) => { const s = firstSchedule(t);
+    return !s || s.status === "inactive" ? "—" : badge(t.scheduled_live_enabled ? "on" : "off"); };
+  return { actions: [h("button", { class: "primary", text: "New task", onclick: () => editTask(null) }),
+                     h("button", { class: "secondary", text: "New dynamic report", onclick: () => editDynamic(null) })],
     content: table([["Description", (t) => h("div", {}, h("strong", { text: t.description || t.name }), t.description && t.description !== t.name ? h("div", { class: "muted", text: `Task: ${t.name}` }) : null)],
-              ["T-Code", (t) => ((t.task_configs || {}).config || {}).tcode || "—"],
-              ["Schedule", (t) => schedText((t.schedules || [])[0])],
+              ["Kind", reportKindTag],
+              ["SAP report(s)", sapText],
+              ["Schedule", (t) => schedText(firstSchedule(t))],
               ["Next run", (t) => nextRun(t)],
+              ["On schedule", onSchedule],
               ["Type", (t) => targetBadge(t.execution_target)],
               ["E-mail", (t) => { const e = (t.task_configs || {}).email || {}; return e.enabled ? `${(e.to || []).length} To / ${(e.cc || []).length} CC` : "off"; }],
               ["Assignments", (t) => (t.assignments || []).filter((a) => a.status === "active").map((a) => name(a.employee_id)).join(", ") || "—"],
               ["Status", (t) => badge(t.status)],
               ["", (t) => h("div", { class: "actions" },
-                 h("button", { class: "small", text: "Edit", onclick: () => editTask(t.id) }),
+                 h("button", { class: "small", text: "Edit", onclick: () => editReport(t) }),
                  h("button", { class: "small", text: "Run Now", disabled: t.status !== "active" || t.execution_mode === "scheduled_only",
                                onclick: () => runNow(t) }))]],
              tasks, "No tasks yet - create the first one.") };
@@ -787,104 +799,82 @@ function editTemplate(t) {
   refresh();
 }
 
-// ------------------------------------------------------------------ runner releases (admin only)
-const SHA_RE = /^[0-9a-f]{64}$/;
-async function sha256Hex(buf) {
-  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", buf))).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
+// ------------------------------------------------------------------ Runner & Releases (admin only)
+// The central (shared) BAH runner and the runner releases on one page. Employee machines are not monitored here.
+// Packages are published by the release process (one-time uploader + checksum check), not from the browser, so
+// there is no upload, download or retire button; release records and their status steps are unchanged.
 async function adminReleases() {
-  const [rels, runners, people] = await Promise.all([
+  const since = new Date(Date.now() - 86400000).toISOString();
+  const [rels, central, execs] = await Promise.all([
     api("/runner_releases?select=*&order=created_at.desc"),
-    api("/runners?select=id,employee_id,name,version,last_seen_at,status&status=eq.active"),
-    api("/profiles?select=id,full_name,email")]);
+    api("/runners?select=id,name,mode,status,version,busy,live_permitted,last_seen_at&status=eq.active&mode=eq.shared&order=name"),
+    api(`/executions?select=runner_id,status,finished_at,error_class&finished_at=gte.${since}&order=finished_at.desc&limit=500`)]);
   const stable = rels.filter((r) => r.status === "stable").sort((a, b) => vcmp(b.version, a.version))[0] || null;
-  const who = (id) => (people.find((p) => p.id === id) || {}).full_name || "?";
+  const ver = (v) => String(v || "—").replace(/^cloud-/, "");
   const setStatus = async (r, status) => {
     let sha = null;
-    if (status === "testing" || status === "stable") {
+    if (status === "draft") {
+      if (!confirm(`Move ${r.version} back to draft?`)) return;
+    } else {
       sha = (prompt(`Mark ${r.version} as ${status.toUpperCase()}.\n\nPaste the SHA-256 printed by the build script for BAH-Runner-${r.version}.zip:`) || "").trim().toLowerCase();
       if (!sha) return;
-    } else if (!confirm(status === "retired" ? `Retire ${r.version}? It can no longer be downloaded by employees (this is final).`
-                                             : `Move ${r.version} back to ${status}?`)) return;
+    }
     try { await api("/rpc/admin_set_release_status", { method: "POST", body: JSON.stringify({ p_release: r.id, p_status: status, p_expected_sha256: sha }) }); render(); }
     catch (x) { alert(x.message); }
   };
   const actions = (r) => h("div", { class: "actions" },
-    h("button", { class: "small", text: "Download", onclick: (e) => releaseDownload(r.object_path, e.target) }),
     r.status === "draft" ? h("button", { class: "small", text: "Mark Testing", onclick: () => setStatus(r, "testing") }) : null,
     r.status === "testing" ? h("button", { class: "small", text: "Mark Stable", onclick: () => setStatus(r, "stable") }) : null,
-    r.status === "testing" ? h("button", { class: "small", text: "Back to Draft", onclick: () => setStatus(r, "draft") }) : null,
-    r.status !== "retired" ? h("button", { class: "small danger", text: "Retire", onclick: () => setStatus(r, "retired") }) : null);
+    r.status === "testing" ? h("button", { class: "small", text: "Back to Draft", onclick: () => setStatus(r, "draft") }) : null);
   const relBadge = (s) => h("span", { class: `badge ${{ stable: "ok", testing: "info", draft: "warn", retired: "" }[s] || ""}`, text: s });
-  return { actions: [h("button", { class: "primary", text: "Upload new release", onclick: () => uploadRelease() })], content: [
-    h("div", { class: "notice", text: stable ? `Employees are offered ${stable.version} (latest Stable). Only Stable releases can be downloaded by employees.`
-                                             : "No Stable release yet - employees cannot download the runner." }),
+  const runningOn = (r) => central.filter((c) => ver(c.version) === r.version);
+  const runnerCard = (c) => {
+    const online = isOnline(c.last_seen_at), mine = execs.filter((e) => e.runner_id === c.id);
+    const [deploy, cls] = runnerState(c.version, stable);
+    return h("div", { class: "card" }, h("h2", { text: `Central runner: ${c.name}` }),
+      h("div", { class: "kpis" },
+        kpiBox("Status", online ? (c.busy ? "online · busy" : "online") : "offline", online ? "ok" : "bad"),
+        kpiBox("Active version", ver(c.version)),
+        kpiBox("Release version", stable ? stable.version : "—"),
+        kpiBox("Jobs (24 h)", `${mine.filter((e) => e.status === "succeeded").length} ok · ${mine.filter((e) => e.status === "failed").length} failed`,
+               mine.some((e) => e.status === "failed") ? "warn" : "")),
+      h("dl", { class: "dl" },
+        h("dt", { text: "Deployment status" }), h("dd", {}, h("span", { class: `badge ${cls}`, text: deploy })),
+        h("dt", { text: "Last check-in" }), h("dd", { text: c.last_seen_at ? `${fmt(c.last_seen_at)} (${ago(c.last_seen_at)})` : "never" }),
+        h("dt", { text: "Live SAP" }), h("dd", { text: c.live_permitted ? "allowed" : "not allowed" }),
+        h("dt", { text: "Last job" }), h("dd", { text: mine.length ? `${fmt(mine[0].finished_at)} - ${mine[0].status}${mine[0].error_class ? " (" + mine[0].error_class + ")" : ""}` : "none in the last 24 hours" })));
+  };
+  return [
+    ...(central.length ? central.map(runnerCard)
+      : [h("div", { class: "notice warn", text: "No central (shared) BAH runner is registered. See VM Management." })]),
+    h("div", { class: "notice", text: stable ? `Latest Stable release: ${stable.version}. A new version is installed on the VM with Update BAH Runner.`
+                                             : "No Stable release yet." }),
     h("div", { class: "card" }, h("h2", { text: "Releases" }),
-      ...table([["Version", (r) => h("strong", { text: r.version })], ["Status", (r) => relBadge(r.status)],
+      ...table([["Version", (r) => h("div", {}, h("strong", { text: r.version }),
+                   runningOn(r).length ? h("div", {}, h("span", { class: "badge ok", text: "active on the central runner" })) : null)],
+                ["Status", (r) => relBadge(r.status)],
                 ["Release date", (r) => r.release_date], ["Size", (r) => `${Math.max(1, Math.round(r.size_bytes / 1024))} KB`],
                 ["SHA-256", (r) => h("span", { class: "mono", title: r.sha256, text: r.sha256.slice(0, 16) + "…" })],
                 ["Checksum confirmed", (r) => r.checksum_verified_at ? fmt(r.checksum_verified_at) : "—"],
                 ["Min. supported", (r) => r.min_supported_version || "—"],
                 ["Notes", (r) => h("div", { class: "muted prewrap notes-cell", text: r.notes || "—" })],
-                ["", actions]], rels, "No releases uploaded yet.")),
-    h("div", { class: "card" }, h("h2", { text: "Installed runner versions" }),
-      ...table([["Employee", (r) => who(r.employee_id)], ["Runner", (r) => r.name],
-                ["Version", (r) => String(r.version || "—").replace(/^cloud-/, "")],
-                ["Status", (r) => { const [t, c] = runnerState(r.version, stable); return h("span", { class: `badge ${c}`, text: t }); }],
-                ["Last seen", (r) => fmt(r.last_seen_at)]], runners, "No active runners."))] };
+                ["", actions]], rels, "No releases yet."))];
 }
 
-function uploadRelease() {
-  const f = { version: inp("", { placeholder: "1.0.1", required: true, pattern: "\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}" }),
-    date: inp(new Date().toISOString().slice(0, 10), { type: "date", required: true }),
-    min: inp("", { placeholder: "optional, e.g. 1.0.0" }), notes: h("textarea", { rows: "6", maxlength: "4000" }),
-    file: h("input", { type: "file", accept: ".zip", required: true }) };
-  const err = h("div", { class: "err" }), info = h("div", { class: "hint" });
-  const save = h("button", { class: "primary", text: "Upload as Draft" });
-  mainArea().replaceChildren(h("form", { onsubmit: async (e) => {
-    e.preventDefault(); err.textContent = ""; save.disabled = true;
-    try {
-      const version = f.version.value.trim(), file = f.file.files[0];
-      if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(version)) throw new Error("Version must be MAJOR.MINOR.PATCH, e.g. 1.0.1");
-      if (f.min.value.trim() && !/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(f.min.value.trim())) throw new Error("Minimum supported version must be MAJOR.MINOR.PATCH");
-      if (!file || file.name !== `BAH-Runner-${version}.zip`) throw new Error(`Choose the package file BAH-Runner-${version}.zip built by the build script.`);
-      if (file.size > 52428800) throw new Error("Package larger than 50 MB.");
-      const buf = await file.arrayBuffer(), sha = await sha256Hex(buf);
-      info.textContent = `SHA-256 of the selected file: ${sha}`;
-      const path = `releases/${version}/${file.name}`;
-      const up = await fetch(`${PROJECT}/storage/v1/object/${RELEASE_BUCKET}/${path}`, { method: "POST", body: buf,
-        headers: { apikey: KEY, authorization: `Bearer ${await token()}`, "content-type": "application/zip", "x-upsert": "false" } });
-      if (!up.ok) throw new Error(`Upload refused (${up.status}) - a package for this version may already exist.`);
-      await api("/runner_releases", { method: "POST", body: JSON.stringify({ version, file_name: file.name, object_path: path,
-        size_bytes: file.size, sha256: sha, release_date: f.date.value, notes: f.notes.value.trim(),
-        min_supported_version: f.min.value.trim() || null, created_by: me.user_id }) });
-      tab = "admin_releases"; render();
-    } catch (x) { err.textContent = x.message; } finally { save.disabled = false; }
-  } }, pageHead("Upload a new runner release", "The generic package (one for all employees). It starts as Draft; confirm its checksum to move it to Testing and Stable.",
-       save, h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() })),
-    h("div", { class: "card" }, h("div", { class: "grid" }, field("Version", f.version, "Must match bah_runner/VERSION in the package"),
-      field("Release date", f.date), field("Minimum supported version", f.min, "Older runners are told to update now"),
-      field("Package file", f.file, "dist\\BAH-Runner-<version>.zip from Build-RunnerPackage.ps1")),
-      field("What's new / release notes", f.notes), info), err));
-}
-
-// Same sections and labels as the local BAH admin navigation.
 const ADMIN_TABS = ["Overview", ["admin_dashboard", "Dashboard", "Operational overview - cloud BAH."],
   "Automation", ["admin_templates", "Report Templates", "Reusable report definitions. Editing creates a new version; existing tasks keep their copy."],
-  ["admin_tasks", "Tasks", "Report tasks, schedules and employee assignments."],
-  ["admin_dynamic", "Dynamic Reports", "Reports built from several SAP reports, matched and transformed on the shared BAH runner."],
+  ["admin_tasks", "Tasks", "Standard and dynamic report tasks, schedules and employee assignments."],
   "People & access", ["admin_people", "Employees", "Accounts, invitations, registration, SAP user IDs and each employee's runner."],
   ["admin_invitations", "Invitations", "Pending, registered, expired and revoked invitations."],
   ["admin_credentials", "SAP Credentials", "Which employees have a usable SAP password saved for the shared runner (status only)."],
   "Execution", ["admin_vms", "VM Management", "The VM that hosts the shared BAH runner: address, runner, sealing key and health."],
-  ["admin_runners", "Runner Monitoring", "Every BAH runner: heartbeat, version, mode and recent jobs."],
+  ["admin_releases", "Runner & Releases", "The central BAH runner (status, version, last check-in) and the runner releases."],
   ["runner", "BAH Runner", "Download, install and update the BAH Runner on your PC."],
   "Monitoring", ["admin_runs", "Execution History", "Every run, including report runs handed over by the local BAH."],
   ["reports", "Reports", "Validated workbooks stored in the cloud."], ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH."],
   ["admin_system", "System Jobs", "Scheduled database jobs and the health of every BAH queue."],
   ["admin_audit", "Audit Logs", "Who did what and when - read-only."],
-  "System", ["admin_releases", "Runner Releases", "Generic BAH Runner packages: upload, verify, release, retire; installed versions."],
-  ["admin_settings", "Settings", "Live SAP authorisation and cloud e-mail sending."],
+  "System", ["admin_settings", "Settings", "Live SAP authorisation and cloud e-mail sending."],
   "My account", ["sap_credentials", "My SAP Credentials", "Save, test, replace or remove the SAP password BAH uses for your reports."],
   ["profile", "My Profile", "Your account details and BAH password."]];
 const ADMIN_VIEWS = { admin_dashboard: adminDashboard, admin_tasks: adminTasks, admin_templates: adminTemplates, admin_people: adminPeople,

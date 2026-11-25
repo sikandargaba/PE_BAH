@@ -211,7 +211,7 @@ const ICONS = {
   shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
 };
 const NAV_ICON = { sap_credentials: "key", profile: "user", admin_invitations: "invite", admin_credentials: "key", admin_vms: "server",
-  admin_runners: "activity", admin_system: "clock", admin_audit: "shield", admin_dashboard: "dashboard", dashboard: "dashboard", admin_templates: "templates", admin_tasks: "tasks", admin_dynamic: "templates", tasks: "tasks",
+  admin_system: "clock", admin_audit: "shield", admin_dashboard: "dashboard", dashboard: "dashboard", admin_templates: "templates", admin_tasks: "tasks", tasks: "tasks",
   admin_people: "users", runner: "runner", admin_runs: "history", runs: "history", reports: "reports", notifications: "mail",
   admin_releases: "releases", admin_settings: "settings" };
 // Trusted Types (CSP require-trusted-types-for 'script'): the ONLY markup this portal ever parses is one of the

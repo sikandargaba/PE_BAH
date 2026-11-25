@@ -233,37 +233,6 @@ async function adminVms() {
   return { actions: [add], content: [slot, ...(cards.length ? cards : [h("div", { class: "empty", text: "No VM registered yet." })])] };
 }
 
-// ------------------------------------------------------------------ Runner Monitoring
-async function adminRunners() {
-  const since = new Date(Date.now() - 86400000).toISOString();
-  const [runners, people, execs, latestRows] = await Promise.all([
-    api("/runners?select=id,employee_id,name,status,mode,version,live_permitted,live_sap_user,busy,last_seen_at,registered_at,revoked_at&order=status,name"),
-    api("/profiles?select=id,full_name"),
-    api(`/executions?select=runner_id,status,finished_at,error_class&finished_at=gte.${since}&order=finished_at.desc&limit=1000`),
-    api("/rpc/release_latest_stable", { method: "POST", body: "{}" }).catch(() => [])]);
-  const latest = (latestRows || [])[0] || null;
-  const who = (id) => (people.find((p) => p.id === id) || {}).full_name || "—";
-  const mine = (r) => execs.filter((e) => e.runner_id === r.id);
-  const active = runners.filter((r) => r.status === "active");
-  return [
-    h("div", { class: "card" }, h("h2", { text: "Runners" }), h("div", { class: "kpis" },
-      kpiBox("Active", active.length), kpiBox("Online", active.filter((r) => isOnline(r.last_seen_at)).length, "ok"),
-      kpiBox("Offline", active.filter((r) => !isOnline(r.last_seen_at)).length, "warn"),
-      kpiBox("Shared online", active.filter((r) => r.mode === "shared" && isOnline(r.last_seen_at)).length, active.some((r) => r.mode === "shared" && isOnline(r.last_seen_at)) ? "ok" : "bad"),
-      kpiBox("Failed jobs (24 h)", execs.filter((e) => e.status === "failed").length, "bad"))),
-    ...table([
-      ["Runner", (r) => h("div", {}, h("strong", { text: r.name }), h("div", { class: "muted", text: `registered to ${who(r.employee_id)}` }))],
-      ["Mode", (r) => badge(r.mode || "personal")],
-      ["State", (r) => r.status !== "active" ? h("div", {}, badge(r.status), h("div", { class: "muted", text: fmt(r.revoked_at) }))
-        : h("div", {}, badge(isOnline(r.last_seen_at) ? (r.busy ? "online · busy" : "online") : "offline"), r.live_permitted ? h("div", { class: "muted", text: "live SAP allowed" }) : null)],
-      ["Last heartbeat", (r) => h("div", {}, ago(r.last_seen_at), h("div", { class: "muted", text: fmt(r.last_seen_at) }))],
-      ["Version", (r) => { const [s, c] = runnerState(r.version, latest); return h("div", {}, String(r.version || "—").replace(/^cloud-/, ""), " ", r.status === "active" ? h("span", { class: `badge ${c}`, text: s }) : null); }],
-      ["Jobs (24 h)", (r) => { const e = mine(r); if (!e.length) return "—";
-        return h("div", {}, `${e.filter((x) => x.status === "succeeded").length} ok · ${e.filter((x) => x.status === "failed").length} failed`,
-          h("div", { class: "muted", text: `last ${fmt(e[0].finished_at)}${e[0].error_class ? " - " + e[0].error_class : ""}` })); }]],
-      runners, "No runners registered.")];
-}
-
 // ------------------------------------------------------------------ System Jobs
 async function adminSystemJobs() {
   const s = await optionalRpc("admin_system_jobs", {}, null);
@@ -343,30 +312,6 @@ const reqToText = (req) => (req || []).map((r) => (typeof r === "string" ? r : [
 const textToReq = (t) => String(t || "").split(/\r?\n/).map((l) => l.split("|").map((x) => x.trim()).filter(Boolean)).filter((p) => p.length)
   .map(([name, ...aliases]) => (aliases.length ? { name, aliases } : name));
 const reqNames = (s) => textToReq(s.req.value).map((r) => (typeof r === "string" ? r : r.name));
-
-async function adminDynamic() {
-  const [tasks, people] = await Promise.all([
-    api("/tasks?select=id,name,description,execution_target,execution_mode,status,report_kind,scheduled_live_enabled,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&report_kind=eq.dynamic&order=name"),
-    api("/profiles?select=id,full_name&order=full_name")]);
-  const name = (id) => (people.find((p) => p.id === id) || {}).full_name || "?";
-  const sched = (t) => { const s = Array.isArray(t.schedules) ? t.schedules[0] : t.schedules; if (!s || s.status === "inactive") return "No schedule (manual only)";
-    return h("div", {}, schedText(s), h("div", {}, badge(t.scheduled_live_enabled ? "active" : "inactive"),
-      h("span", { class: "muted", text: t.scheduled_live_enabled ? " scheduled runs approved" : " scheduled runs off until approved" }))); };
-  return { actions: [h("button", { class: "primary", text: "New dynamic report", onclick: () => editDynamic(null) })],
-    content: [h("p", { class: "hint", text: "Each source runs with the run owner's own SAP user. Required columns are checked in every SAP layout " +
-        "before anything is extracted. Scheduled runs start only after approval under Settings > Scheduled reports." }),
-      ...table([["Report", (t) => h("div", {}, h("strong", { text: t.description || t.name }), h("div", { class: "muted", text: `Task: ${t.name}` }))],
-                ["SAP sources", (t) => dynSourceText((t.task_configs || {}).config)],
-                ["Schedule", sched],
-                ["E-mail", (t) => { const e = (t.task_configs || {}).email || {}; return e.enabled ? `${(e.to || []).length} To / ${(e.cc || []).length} CC` : "off"; }],
-                ["Assignments", (t) => (t.assignments || []).filter((a) => a.status === "active").map((a) => name(a.employee_id)).join(", ") || "—"],
-                ["Status", (t) => badge(t.status)],
-                ["", (t) => h("div", { class: "actions" },
-                   h("button", { class: "small", text: "Edit", onclick: () => editDynamic(t.id) }),
-                   h("button", { class: "small", text: "Run Now", disabled: t.status !== "active" || t.execution_mode === "scheduled_only",
-                                 onclick: () => runNow(t) }))]],
-               tasks, "No dynamic reports yet.")] };
-}
 
 async function editDynamic(id) {
   const conn = (await api("/app_connections?select=id,code,display_name&status=eq.active"))[0];
@@ -542,7 +487,7 @@ async function editDynamic(id) {
         else if (a && box.checked !== (a.status === "active"))
           await api(`/assignments?id=eq.${a.id}`, { method: "PATCH", body: JSON.stringify({ status: box.checked ? "active" : "inactive" }) });
       }
-      tab = "admin_dynamic"; render();
+      tab = "admin_tasks"; render();
     } catch (x) { err.textContent = x.message; } finally { save.disabled = false; }
   } },
     pageHead(id ? `Edit dynamic report: ${t.name}` : "New dynamic report", "Several SAP reports, matched and transformed on the shared BAH runner."),
@@ -580,4 +525,4 @@ async function editDynamic(id) {
 }
 
 Object.assign(ADMIN_VIEWS, { admin_people: adminPeopleV2, admin_invitations: adminInvitations, admin_credentials: adminCredentials,
-  admin_vms: adminVms, admin_runners: adminRunners, admin_system: adminSystemJobs, admin_audit: adminAudit, admin_dynamic: adminDynamic });
+  admin_vms: adminVms, admin_system: adminSystemJobs, admin_audit: adminAudit });
