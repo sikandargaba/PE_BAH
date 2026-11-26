@@ -114,7 +114,9 @@ async function adminTasks() {
     ["", (t) => h("div", { class: "actions" },
        h("button", { class: "small", text: "Edit", onclick: () => editReport(t) }),
        h("button", { class: "small", text: "Run Now", disabled: t.status !== "active" || t.execution_mode === "scheduled_only",
-                     onclick: () => runNow(t) }))]];
+                     onclick: () => runNow(t) }),
+       h("button", { class: "small secondary", text: "Excel only", title: "Run Now without any e-mail: the workbook is only stored under Reports",
+                     disabled: t.status !== "active" || t.execution_mode === "scheduled_only", onclick: () => runNow(t, true) }))]];
   return { actions: [h("button", { class: "primary", text: "New Static Report Task", onclick: () => editTask(null) }),
                      h("button", { class: "primary", text: "New Dynamic Report Task", onclick: () => editDynamicTask(null) })],
     content: table(cols, tasks, "No tasks yet - create the first one.") };
@@ -492,28 +494,34 @@ function configSummary(c, source) {
     h("dl", { class: "dl" }, rows.flatMap(([k, v]) => [h("dt", { text: k }), h("dd", { text: v })])));
 }
 
-async function runNow(t) {
+// excelOnly: "Excel only" - the same Run Now (bah.admin_run_now_excel_only), but NO e-mail of any kind is sent for this
+// one run (report, failure or notice); the workbook is only stored under Reports. The task's e-mail settings and
+// schedule are not changed.
+async function runNow(t, excelOnly = false) {
   let live = false;
+  const mail = excelOnly ? "EXCEL ONLY: no e-mail of any kind is sent for this run (report, failure or notice). The workbook is stored under Reports only. The task's e-mail settings and schedule are not changed."
+                         : "The report stays assigned to its employee and its e-mail goes to the task's configured recipients.";
   if (t.execution_target === "live_sap") {
-    if (!confirm(`LIVE SAP Run Now for "${t.name}".\n\nThe report runs on YOUR BAH Runner with YOUR SAP user (${me.full_name}). Keep Start BAH Runner open and be present for the SAP login.\nThe report stays assigned to its employee and its e-mail goes to the task's configured recipients.\n\nStart the live run now?`)) return;
+    if (!confirm(`LIVE SAP Run Now${excelOnly ? " - Excel only" : ""} for "${t.name}".\n\nThe report runs on YOUR BAH Runner with YOUR SAP user (${me.full_name}). Keep Start BAH Runner open and be present for the SAP login.\n${mail}\n\nStart the live run now?`)) return;
     live = true;
-  } else if (!confirm(`Run "${t.name}" now on your BAH Runner?`)) return;
+  } else if (!confirm(`Run "${t.name}" now on your BAH Runner?${excelOnly ? "\n\n" + mail : ""}`)) return;
   try {
     // administrator Run Now: the signed-in administrator's runner and SAP user execute; ownership is unchanged
-    const rows = await api("/rpc/admin_run_now", { method: "POST", body: JSON.stringify({ p_task: t.id, p_request_key: uid(), p_confirm_live: live, p_run_as_admin: true }) });
-    alert(`Queued ${rows.length} run(s) on your BAH Runner. Track them under Execution History.`);
+    const rows = await api(`/rpc/${excelOnly ? "admin_run_now_excel_only" : "admin_run_now"}`, { method: "POST", body: JSON.stringify({ p_task: t.id, p_request_key: uid(), p_confirm_live: live, p_run_as_admin: true }) });
+    alert(`Queued ${rows.length} run(s) on your BAH Runner${excelOnly ? " - Excel only, no e-mail" : ""}. Track them under Execution History.`);
     tab = "admin_runs"; render();
   } catch (x) { alert(`Run Now refused: ${x.message}`); }
 }
 
 // ------------------------------------------------------------------ runs: failures + cancel
 async function adminRuns() {
-  const rows = await api("/occurrences?select=id,kind,status,due_at,attempts,max_attempts,employee_id,executor_id,tasks(name,description),owner:profiles!occurrences_employee_id_fkey(full_name),executor:profiles!occurrences_executor_id_fkey(full_name),executions(attempt_no,status,finished_at,row_count,validation_status,error_class,error_detail,engine,sap_user)&order=due_at.desc&limit=150");
+  const rows = await api("/occurrences?select=id,kind,status,due_at,attempts,max_attempts,employee_id,executor_id,email_suppressed,tasks(name,description),owner:profiles!occurrences_employee_id_fkey(full_name),executor:profiles!occurrences_executor_id_fkey(full_name),executions(attempt_no,status,finished_at,row_count,validation_status,error_class,error_detail,engine,sap_user)&order=due_at.desc&limit=150");
   return table([["Task", (o) => repName(o.tasks)], ["Assigned employee", (o) => (o.owner || {}).full_name || "—"],
                 ["Executed by", (o) => { const e = (o.executions || []).sort((a, b) => b.attempt_no - a.attempt_no)[0];
                    const who = o.executor_id ? (o.executor || {}).full_name || "Administrator" : (o.owner || {}).full_name || "—";
                    return h("div", {}, who, e && e.sap_user ? h("div", { class: "muted", text: `SAP ${e.sap_user}` }) : null); }],
-                ["Due", (o) => fmt(o.due_at)], ["Status", (o) => badge(o.status)],
+                ["Due", (o) => fmt(o.due_at)],
+                ["Status", (o) => o.email_suppressed ? h("div", {}, badge(o.status), h("div", { class: "muted", text: "Excel only - no e-mail" })) : badge(o.status)],
                 ["Last attempt", (o) => { const e = (o.executions || []).sort((a, b) => b.attempt_no - a.attempt_no)[0];
                    return e ? h("div", {}, badge(e.status), ` ${e.engine || ""} ${e.row_count != null ? rowsText(e) : ""}`,
                      e.error_class ? h("div", { class: "muted", text: `${e.error_class}${e.error_detail ? " - " + e.error_detail : ""}` }) : null) : "not started"; }],
