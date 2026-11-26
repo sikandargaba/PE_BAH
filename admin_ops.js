@@ -625,5 +625,194 @@ async function editDynamicTask(id) {
   picker.start();
 }
 
-Object.assign(ADMIN_VIEWS, { admin_dynamic: adminDynamicReports, admin_people: adminPeopleV2, admin_invitations: adminInvitations, admin_credentials: adminCredentials,
+// ------------------------------------------------------------------ Monthly Reporting Workings (month-end packs)
+// A month-end pack (task report_kind 'month_end_pack', runner 1.2.0+) runs several SAP reports for the previous
+// completed calendar month and e-mails each report's own Excel export as an attachment - nothing merged, no data in
+// the e-mail body. All or nothing: if any report fails or its export is missing, no e-mail with attachments is sent
+// and the existing failure notice is used. The definition (task_configs.config.pack) is checked by the database on
+// save (bah.pack_config_problems) and again by the runner before any SAP contact. Scheduled runs start only after an
+// administrator opts the task in under Settings > Scheduled reports.
+const packSources = (c) => (((c || {}).pack || {}).sources || []);
+const packSourceText = (c) => packSources(c).map((s) => `${s.tcode}${s.variant ? ` (${s.variant})` : ""}`).join(" + ") || "—";
+const PACK_MENU_DEFAULT = "List > Export > Spreadsheet";
+const packBlankConfig = () => ({ report_kind: "month_end_pack", report_name: "", tcode: "", date_rule: "previous_month", date_fields: [],
+  output: { filename_pattern: "{ReportName}" },
+  pack: { version: 1, sources: [{ key: "r1", label: "", tcode: "", variant: "", date_field: "", export: { menu_path: ["List", "Export", "Spreadsheet"] } }] } });
+
+async function adminMonthEnd() {
+  const [tasks, people] = await Promise.all([
+    api("/tasks?select=id,name,description,status,execution_mode,scheduled_live_enabled,task_configs(config,email),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(employee_id,status)&report_kind=eq.month_end_pack&order=name"),
+    api("/profiles?select=id,full_name&order=full_name")]);
+  const name = (id) => (people.find((p) => p.id === id) || {}).full_name || "?";
+  const first = (t) => Array.isArray(t.schedules) ? t.schedules[0] : t.schedules;
+  return { actions: [h("button", { class: "primary", text: "New Monthly Reporting Working", onclick: () => editPackTask(null) })],
+    content: table([["Report", (t) => h("div", {}, h("strong", { text: ((t.task_configs || {}).config || {}).report_name || repName(t) }),
+                                         h("div", { class: "muted", text: `Task: ${t.name}` }))],
+              ["SAP reports", (t) => packSourceText((t.task_configs || {}).config)],
+              ["Period", () => "Previous calendar month"],
+              ["Schedule", (t) => schedText(first(t)).replace(/ Asia\/Karachi/g, "")],
+              ["Assigned", (t) => (t.assignments || []).filter((a) => a.status === "active").map((a) => name(a.employee_id)).join(", ") || "—"],
+              ["Recipients", (t) => { const e = (t.task_configs || {}).email || {}; return e.enabled ? (e.to || []).join(", ") || "—" : "e-mail off"; }],
+              ["On schedule", (t) => badge(t.scheduled_live_enabled ? "on" : "off")],
+              ["Status", (t) => badge(t.status)],
+              ["", (t) => h("div", { class: "actions" }, h("button", { class: "small", text: "Edit", onclick: () => editPackTask(t.id) }))]],
+             tasks, "No monthly reporting workings yet - create the first one.") };
+}
+
+async function editPackTask(id) {
+  const conn = (await api("/app_connections?select=id,code,display_name&status=eq.active"))[0];
+  if (!conn) { alert("No active SAP connection configured."); return; }
+  let t = { name: "", description: "", execution_target: "live_sap", execution_mode: "scheduled_and_manual", status: "active" };
+  let cfg = packBlankConfig();
+  let em = { enabled: true, to: [], cc: [], bcc: [], subject: "{report_name} - {period_month}", body: "", failure_subject: "", failure_body: "",
+             notify_success: true, notify_failure: true, delivery_format: "attachment" };
+  let sc = null, asg = [];
+  if (id) {
+    t = (await api(`/tasks?select=*&id=eq.${id}`))[0];
+    const c = (await api(`/task_configs?select=config,email&task_id=eq.${id}`))[0];
+    if (c) { cfg = c.config; em = { ...em, ...c.email }; }
+    sc = (await api(`/schedules?select=*&task_id=eq.${id}`))[0] || null;
+    asg = await api(`/assignments?select=id,employee_id,status&task_id=eq.${id}`);
+  }
+  const f = {
+    title: inp(cfg.report_name || t.description || "", { maxlength: "120", required: true, placeholder: "e.g. Export Sales Month-End Data Pack" }),
+    name: inp(t.name, { maxlength: "120", required: true, placeholder: "e.g. Export Sales Working" }),
+    mode: sel(t.execution_mode, [["scheduled_and_manual", "Scheduled and manual"], ["manual_only", "Manual Run Now only"], ["scheduled_only", "Scheduled only"]]),
+    status: sel(t.status, [["active", "Active"], ["inactive", "Inactive"], ...(t.status === "paused" ? [["paused", "Paused"]] : [])]),
+    freq: sel(sc && sc.status !== "inactive" ? sc.frequency : (id ? "" : "monthly"), [["", "No schedule (manual only)"], ["monthly", "Monthly"]]),
+    mday: inp(sc && sc.month_day ? sc.month_day : 1, { type: "number", min: "1", max: "28" }),
+    time: inp(sc ? sc.run_time.slice(0, 5) : "00:05", { type: "time" }),
+    eon: chk(em.enabled), esub: inp(em.subject, { maxlength: "200", class: "wide" }),
+    ebody: h("textarea", { class: "email-body", rows: "5", placeholder: "e.g. Please find attached the export invoice data and ledger for the month of {period_month}" }),
+    nsucc: chk(em.notify_success), nfail: chk(em.notify_failure),
+  };
+  f.ebody.value = em.body || "";
+  const rTo = emailChips(em.to || [], "name@company.com"), rCc = emailChips(em.cc || [], "Add CC"), rBcc = emailChips(em.bcc || [], "Add BCC");
+
+  // ---- SAP reports (run in this order; each one's own Excel export becomes one attachment)
+  const box = h("div", {});
+  const rows = [];
+  const addRow = (s) => {
+    const x = { label: inp(s.label, { maxlength: "60", placeholder: "e.g. Export Sales" }),
+      tcode: inp(s.tcode, { maxlength: "30", placeholder: "e.g. ZSDCY" }), variant: inp(s.variant || "", { maxlength: "40", placeholder: "e.g. /EXP SALES ALL" }),
+      field: inp(s.date_field, { maxlength: "80", placeholder: "e.g. Created on" }),
+      group: inp(s.date_group || "", { maxlength: "60", placeholder: "optional, e.g. Billing" }), radio: inp(s.radio || "", { maxlength: "80", placeholder: "optional, e.g. All items" }),
+      how: sel((s.export || {}).shortcut ? "shortcut" : "menu", [["menu", "Menu path"], ["shortcut", "Shift+F4"]]),
+      menu: inp(((s.export || {}).menu_path || []).join(" > ") || PACK_MENU_DEFAULT, { maxlength: "120" }),
+      stem: inp(s.file_stem || (s.label ? `${s.label} {period_month}` : ""), { maxlength: "80", placeholder: "e.g. Export Sales {period_month}" }),
+      key: s.key, card: h("div", { class: "fieldset" }) };
+    const menuField = field("Menu path", x.menu, "Entries separated by >, e.g. List > Export > Spreadsheet");
+    const sync = () => { menuField.hidden = x.how.value !== "menu"; };
+    x.how.addEventListener("change", sync);
+    x.draw = () => {
+      x.card.replaceChildren(h("div", { class: "card-head" }, h("strong", { text: `Report ${rows.indexOf(x) + 1}` }),
+          rows.length > 1 ? h("button", { type: "button", class: "small secondary", text: "Remove", onclick: () => { rows.splice(rows.indexOf(x), 1); draw(); } }) : null),
+        h("div", { class: "grid-3" }, field("Name", x.label), field("T-code", x.tcode), field("Variant", x.variant),
+          field("Date field", x.field, "Set to the period (first to last day)"),
+          field("Date field block", x.group, "Only when the label appears in several blocks: the block's title"), field("Radio button", x.radio, "Selected after the variant, before the dates"),
+          field("Excel export", x.how), menuField, field("Attachment name", x.stem, "{period_month} = Oct-26")));
+      sync();
+    };
+    rows.push(x);
+  };
+  const draw = () => { rows.forEach((x) => x.draw()); box.replaceChildren(...rows.map((x) => x.card)); };
+  packSources(cfg).forEach(addRow);
+  draw();
+  const addBtn = h("button", { type: "button", class: "secondary", text: "Add SAP report", onclick: () => { if (rows.length < 5) { addRow({ key: "", label: "", tcode: "", date_field: "", export: { menu_path: ["List", "Export", "Spreadsheet"] } }); draw(); } } });
+
+  const mdayField = field("Day of month", f.mday), timeField = field("Time (Asia/Karachi)", f.time);
+  const syncSched = () => { mdayField.hidden = timeField.hidden = !f.freq.value; };
+  f.freq.addEventListener("change", syncSched); syncSched();
+
+  let assignBoxes = [];
+  const save = h("button", { class: "primary", text: id ? "Save changes" : "Create" });
+  const picker = employeePicker({
+    load: async () => (await api("/profiles?select=id,full_name,email,role,status&order=full_name")).filter((p) => p.status === "active")
+      .map((p) => { const a = asg.find((x) => x.employee_id === p.id); return { p, a, box: { checked: !!(a && a.status === "active") } }; }),
+    onLoaded: (entries) => { assignBoxes = entries; save.disabled = false; }, onChange: () => {} });
+
+  const build = () => {
+    const used = new Set();
+    const sources = rows.map((x, i) => {
+      let key = x.key || (x.tcode.value.trim().toLowerCase().replace(/[^a-z0-9_]/g, "") || `r${i + 1}`).slice(0, 20);
+      while (used.has(key)) key = `${key.slice(0, 17)}_${i + 1}`;
+      used.add(key);
+      const s = { key, label: x.label.value.trim(), tcode: x.tcode.value.trim().toUpperCase(), variant: x.variant.value.trim(),
+                  date_field: x.field.value.trim(),
+                  export: x.how.value === "shortcut" ? { shortcut: "Shift+F4" }
+                                                     : { menu_path: x.menu.value.split(">").map((m) => m.trim()).filter(Boolean) } };
+      if (x.group.value.trim()) s.date_group = x.group.value.trim();
+      if (x.radio.value.trim()) s.radio = x.radio.value.trim();
+      if (x.stem.value.trim()) s.file_stem = x.stem.value.trim();
+      return s;
+    });
+    const config = { ...cfg, report_kind: "month_end_pack", report_name: f.title.value.trim(), tcode: (sources[0] || {}).tcode || "",
+                     date_rule: "previous_month", date_fields: [], pack: { version: 1, sources } };
+    delete config.variant;
+    return config;
+  };
+
+  const err = h("div", { class: "err" });
+  const form = h("form", { class: "task-form", onsubmit: async (e) => {
+    e.preventDefault(); err.textContent = ""; save.disabled = true;
+    try {
+      if (!f.name.value.trim() || !f.title.value.trim()) throw new Error("Report title and task name are required.");
+      const to = rTo.values(), cc = rCc.values(), bcc = rBcc.values();
+      if (rTo.pendingInvalid() || rCc.pendingInvalid() || rBcc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
+      if (f.eon.checked && !to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
+      const config = build();
+      const problems = await api("/rpc/pack_config_problems", { method: "POST", body: JSON.stringify({ p_config: config }) });
+      if (problems && problems.length) throw new Error("Please correct the reports: " + problems.join("; "));
+      const row = { name: f.name.value.trim(), description: f.title.value.trim(), connection_id: conn.id, execution_target: "live_sap",
+                    execution_mode: f.mode.value, status: f.status.value, template_id: null, template_version: null };
+      const saved = id ? (await api(`/tasks?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(row), headers: { prefer: "return=representation" } }))[0]
+                       : (await api("/tasks", { method: "POST", body: JSON.stringify({ ...row, report_kind: "month_end_pack", created_by: me.user_id }), headers: { prefer: "return=representation" } }))[0];
+      const tid = saved.id;
+      // Excel attachments only: never a data table in the body
+      const email = { ...em, enabled: f.eon.checked, to, cc, bcc, subject: f.esub.value.trim(), body: f.ebody.value,
+                      notify_success: f.nsucc.checked, notify_failure: f.nfail.checked, delivery_format: "attachment", format_version: 2 };
+      await upsert("task_configs", { task_id: tid, config, email }, "task_id");
+      if (f.freq.value) {
+        await upsert("schedules", { task_id: tid, frequency: "monthly", run_time: f.time.value || "00:05", status: "active",
+          weekday: null, anchor_date: null, month_day: Number(f.mday.value) || 1, last_day_of_month: false }, "task_id");
+      } else if (sc) {
+        await api(`/schedules?task_id=eq.${tid}`, { method: "PATCH", body: JSON.stringify({ status: "inactive" }) });
+      }
+      for (const { p, a, box: b } of assignBoxes) {
+        if (b.checked && !a) await api("/assignments", { method: "POST", body: JSON.stringify({ task_id: tid, employee_id: p.id, created_by: me.user_id }) });
+        else if (a && b.checked !== (a.status === "active"))
+          await api(`/assignments?id=eq.${a.id}`, { method: "PATCH", body: JSON.stringify({ status: b.checked ? "active" : "inactive" }) });
+      }
+      tab = "admin_month_end"; render();
+    } catch (x) { err.textContent = /duplicate|unique/i.test(x.message) ? "Another task already uses this name." : x.message; }
+    finally { save.disabled = false; }
+  } },
+    pageHead(id ? `Edit monthly reporting working: ${t.name}` : "New monthly reporting working",
+      "Month-end closing: several SAP reports for the previous calendar month, each e-mailed as its own Excel file."),
+    h("section", { class: "card form-card" }, h("h2", { text: "1. Report details" }),
+      h("div", { class: "grid-2" }, field("Report title", f.title, "Shown in e-mails ({report_name})."), field("Task name", f.name),
+        field("Execution mode", f.mode), field("Status", f.status)),
+      h("p", { class: "hint", text: "Reporting period: the previous completed calendar month (a run on 1 November uses 1-31 October)." })),
+    h("section", { class: "card form-card" }, h("h2", { text: "2. SAP reports (in this order)" }), box, h("div", { class: "actions" }, addBtn),
+      h("p", { class: "hint", text: "Each report: variant, optional radio button, the period in its date field, Execute (F8), then SAP's own Excel export. " +
+        "If any report fails or its Excel export is missing, no e-mail with attachments is sent and the assigned employee is notified." })),
+    h("section", { class: "card form-card" }, h("h2", { text: "3. Schedule" }),
+      h("div", { class: "grid-3" }, field("Frequency", f.freq), mdayField, timeField),
+      h("p", { class: "hint", text: "Runs on the shared BAH runner (1.2.0 or newer). Scheduled runs start only after an administrator opts this task in under Settings > Scheduled reports." })),
+    h("section", { class: "card form-card" }, h("h2", { text: "4. Assigned employees" }), picker.el,
+      h("p", { class: "hint", text: "SAP is accessed with the run owner's own saved SAP password; the e-mail is sent as that employee's address." })),
+    h("section", { class: "card form-card" }, h("div", { class: "card-head" }, h("h2", { text: "5. E-mail" }), h("label", { class: "toggle" }, f.eon, " Send report e-mail")),
+      h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el), field("BCC", rBcc.el)), field("Subject", f.esub),
+      h("label", { class: "field" }, "Body", placeholderBar(f.ebody), f.ebody),
+      h("div", { class: "grid-2" }, field("Send the e-mail when every report succeeded", f.nsucc), field("Send a failure e-mail when the run fails", f.nfail)),
+      h("p", { class: "hint", text: "Attachments: the Excel files only. {period_month} is the reporting month, e.g. Oct-26." })),
+    err,
+    h("div", { class: "sticky-actions" }, h("span", { class: "hint", text: id ? "Changes apply to future runs." : "" }),
+      h("div", { class: "actions" }, h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => render() }), save)));
+  mainArea().replaceChildren(form);
+  save.disabled = true;
+  picker.start();
+}
+
+Object.assign(ADMIN_VIEWS, { admin_dynamic: adminDynamicReports, admin_month_end: adminMonthEnd, admin_people: adminPeopleV2, admin_invitations: adminInvitations, admin_credentials: adminCredentials,
   admin_vms: adminVms, admin_system: adminSystemJobs, admin_audit: adminAudit });

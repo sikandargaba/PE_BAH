@@ -86,9 +86,11 @@ const visibleTask = (id) => !HIDDEN_TASK_IDS.has(id);
 // Tasks = SCHEDULING only (schedule, assignees, e-mail, Run Now). Report definitions live elsewhere: static reports
 // under Static Reports (bah.report_templates), dynamic reports under Dynamic Reports (bah.dynamic_reports). Each task
 // references exactly one definition of its own type, and the two types are listed and edited separately here.
-const reportKindTag = (t) => h("span", { class: `badge ${t.report_kind === "dynamic" ? "info" : ""}`,
-                                         text: t.report_kind === "dynamic" ? "Dynamic report" : "Static report" });
-const editReport = (t) => t.report_kind === "dynamic" ? editDynamicTask(t.id) : editTask(t.id);
+const REPORT_KIND_LABEL = { dynamic: "Dynamic report", month_end_pack: "Monthly Reporting Working" };
+const reportKindTag = (t) => h("span", { class: `badge ${REPORT_KIND_LABEL[t.report_kind] ? "info" : ""}`,
+                                         text: REPORT_KIND_LABEL[t.report_kind] || "Static report" });
+const editReport = (t) => t.report_kind === "dynamic" ? editDynamicTask(t.id)
+                        : t.report_kind === "month_end_pack" ? editPackTask(t.id) : editTask(t.id);
 async function adminTasks() {
   const [allTasks, people] = await Promise.all([
     api("/tasks?select=id,name,description,execution_target,execution_mode,status,report_kind,scheduled_live_enabled,task_configs(config),schedules(frequency,run_time,weekday,month_day,last_day_of_month,anchor_date,status),assignments(id,employee_id,status)&order=name"),
@@ -101,7 +103,8 @@ async function adminTasks() {
   // Display only: the schedule without the time-zone suffix (every BAH schedule is Asia/Karachi; stored values unchanged).
   const schedShort = (t) => schedText(firstSchedule(t)).replace(/ Asia\/Karachi/g, "").replace(/ Karachi/g, "");
   const sapText = (t) => t.report_kind === "dynamic" ? dynSourceText((t.task_configs || {}).config)
-                                                     : ((t.task_configs || {}).config || {}).tcode || "—";
+                       : t.report_kind === "month_end_pack" ? packSourceText((t.task_configs || {}).config)
+                       : ((t.task_configs || {}).config || {}).tcode || "—";
   // ONE table for static and dynamic report tasks; the Report type column tells them apart.
   const cols = [["Task", (t) => h("strong", { text: t.name })],
     ["Report type", reportKindTag], ["SAP report(s)", sapText],
@@ -151,7 +154,7 @@ function emailChips(initial, placeholder) {
            values: () => { if (input.value.trim()) add(input.value); return values.slice(); }, pendingInvalid: () => !!input.value.trim() };
 }
 
-const PLACEHOLDERS = ["{report_name}", "{period_start}", "{period_end}", "{execution_date}", "{assigned_employee}", "{execution_status}"];
+const PLACEHOLDERS = ["{report_name}", "{period_start}", "{period_end}", "{period_month}", "{execution_date}", "{assigned_employee}", "{execution_status}"];
 function placeholderBar(target) {
   return h("div", { class: "ph-bar" }, h("span", { class: "hint", text: "Insert:" }),
     PLACEHOLDERS.map((ph) => h("button", { type: "button", class: /^\{period_/.test(ph) ? "ph ph-period" : "ph", text: ph, onclick: () => {
@@ -952,7 +955,8 @@ async function adminReleases() {
 const ADMIN_TABS = ["Overview", ["admin_dashboard", "Dashboard", "Operational overview - cloud BAH."],
   "Automation", ["admin_templates", "Static Reports", "Single SAP report definitions: T-Code, variant and date conditions. Editing creates a new version; existing tasks keep their copy."],
   ["admin_dynamic", "Dynamic Reports", "Multi-source report definitions such as LC Margin Held. Editing creates a new version; tasks choose when to use it."],
-  ["admin_tasks", "Tasks", "Schedules, assignees and e-mail for static and dynamic report tasks."],
+  ["admin_month_end", "Monthly Reporting Workings", "Month-end closing packs: several SAP reports for the previous month, each e-mailed as its own Excel file."],
+  ["admin_tasks", "Tasks", "Schedules, assignees and e-mail for static reports, dynamic reports and monthly reporting workings."],
   "People & access", ["admin_people", "Employees", "Accounts, invitations, registration, SAP user IDs and each employee's runner."],
   ["admin_invitations", "Invitations", "Pending, registered, expired and revoked invitations."],
   ["admin_credentials", "SAP Credentials", "Which employees have a usable SAP password saved for the shared runner (status only)."],
