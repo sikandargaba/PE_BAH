@@ -361,8 +361,22 @@ async function editDynamicReport(id) {
     xprefix: inp(d.extract.prefix, { maxlength: "10", placeholder: "e.g. 32" }), xsep: inp(d.extract.separator, { maxlength: "3" }),
     xlen: inp(d.extract.length, { type: "number", min: "4", max: "20" }), xmiss: inp(d.extract.missing_value, { maxlength: "20" }),
     mlookup: inp(d.match.lookup, { maxlength: "20" }), mcol: inp(d.match.column, { maxlength: "80" }),
-    agecol: inp(d.aging.column, { maxlength: "80" }),
+    agecol: inp((d.aging || {}).column, { maxlength: "80" }),
   };
+  // Options this form does not show (runner 1.2.5+: classification, RE-only rows, several separators, unmatched
+  // lookups, "Missing" text, decimals / Total ...) are KEPT exactly as saved - build() starts from the saved definition.
+  const kept = [];
+  const k = d.classify;
+  if (k) kept.push(`classification by ${k.by}: ${k.keep === "mixed_types" ? "groups with more than one type" : "the remaining groups"}` +
+                   (k.only ? `, ${k.by} ${k.only.join(" / ")} rows only` : ""));
+  if (d.extract.separators) kept.push(`separators ${d.extract.separators.join(" ")}`);
+  if (d.extract.plain) kept.push("also the unseparated full-length value");
+  if (d.extract.on_ambiguous === "invalid") kept.push("a text with two different values gives no value");
+  if (d.match.on_missing === "unmatched") kept.push(`values not in the lookup report are ${d.match.unmatched_rows === "exclude" ? "left out" : "kept"}`);
+  for (const c of d.columns) {
+    const x = [c.if_unmatched ? `"${c.if_unmatched}" when not found` : "", c.decimals !== undefined ? `${c.decimals} decimals` : "", c.total ? "Total row" : ""].filter(Boolean);
+    if (x.length) kept.push(`${c.heading}: ${x.join(", ")}`);
+  }
 
   // ---- SAP source reports (first = primary: one output row per row; the others are lookups)
   const srcBox = h("div", {});
@@ -400,7 +414,8 @@ async function editDynamicReport(id) {
     return opts;
   };
   const addOut = (c) => {
-    const r = { heading: inp(c.heading, { maxlength: "80" }), value: h("select", {}), type: sel(c.type || "text", DYN_TYPES), saved: c.value };
+    const { heading: _h, value: _v, type: _t, ...extra } = c;          // decimals, total, if_unmatched ... kept on save
+    const r = { heading: inp(c.heading, { maxlength: "80" }), value: h("select", {}), type: sel(c.type || "text", DYN_TYPES), saved: c.value, extra };
     r.tr = h("tr", {}, h("td", {}, r.heading), h("td", {}, r.value), h("td", {}, r.type),
       h("td", {}, h("div", { class: "actions" },
         h("button", { type: "button", class: "small secondary", text: "↑", "aria-label": "Move up", onclick: () => { const i = outRows.indexOf(r); if (i > 0) { outRows.splice(i - 1, 0, outRows.splice(i, 1)[0]); drawOut(); } } }),
@@ -434,15 +449,23 @@ async function editDynamicReport(id) {
     const srcs = sources.map((x, i) => ({ key: x.key.value.trim(), tcode: x.tcode.value.trim().toUpperCase(), variant: x.variant.value.trim(),
       role: i === 0 ? "primary" : "lookup", row_key_column: x.rowkey.value.trim(), required_columns: textToReq(x.req.value) }));
     const len = Number(f.xlen.value);
+    // start from the saved definition so options the form does not show are kept; the form's fields override
+    const extract = { ...d.extract, name: f.xname.value.trim(), source: srcs[0].key, column: f.xcol.value.trim(),
+                      prefix: f.xprefix.value.trim(), separator: f.xsep.value, length: len, missing_value: f.xmiss.value.trim() || "Missing" };
+    if (!extract.separator && extract.separators) delete extract.separator;            // "separators" is used instead
+    const dyn = { ...d, version: 1, sources: srcs, extract,
+      match: { ...d.match, value: f.xname.value.trim(), lookup: f.mlookup.value.trim(), column: f.mcol.value.trim(), length: len, combine: "distinct_comma" },
+      aging: { column: f.agecol.value.trim() },
+      columns: outRows.map((r) => {
+        const type = r.value.value === "aging" ? "integer" : r.type.value;
+        const extra = { ...r.extra };
+        if (type !== "number") { delete extra.decimals; delete extra.total; }             // number-only options
+        if (type !== "text") delete extra.if_unmatched;                                    // text-only option
+        return { heading: r.heading.value.trim(), value: r.value.value, ...(type !== "text" ? { type } : {}), ...extra }; }),
+      sort: f.sortcol.value ? [{ heading: f.sortcol.value, direction: f.sortdir.value }] : [] };
+    if (!dyn.aging.column) delete dyn.aging;                   // no aging rule (runner 1.2.6+)
     const config = { ...cfg, tcode: srcs[0].tcode, report_kind: "dynamic", report_name: f.desc.value.trim(), date_rule: "none", date_fields: [],
-      dynamic: { version: 1, sources: srcs,
-        extract: { name: f.xname.value.trim(), source: srcs[0].key, column: f.xcol.value.trim(), prefix: f.xprefix.value.trim(),
-                   separator: f.xsep.value, length: len, missing_value: f.xmiss.value.trim() || "Missing" },
-        match: { value: f.xname.value.trim(), lookup: f.mlookup.value.trim(), column: f.mcol.value.trim(), length: len, combine: "distinct_comma" },
-        aging: { column: f.agecol.value.trim() },
-        columns: outRows.map((r) => ({ heading: r.heading.value.trim(), value: r.value.value,
-                                       ...(r.value.value === "aging" ? { type: "integer" } : r.type.value !== "text" ? { type: r.type.value } : {}) })),
-        sort: f.sortcol.value ? [{ heading: f.sortcol.value, direction: f.sortdir.value }] : [] } };
+      dynamic: dyn };
     delete config.variant;                                    // never a top-level variant (older runners)
     return config;
   };
@@ -490,7 +513,9 @@ async function editDynamicReport(id) {
         "Rows without it are kept and show the 'missing' text. Every primary row stays a separate output row; several lookup rows for one value are combined into one cell (distinct values, comma-separated)." }),
       h("div", { class: "grid-3" }, field("Value name", f.xname), field("Text column (primary report)", f.xcol), field("Prefix", f.xprefix),
         field("Separator", f.xsep), field("Full length (digits)", f.xlen), field("Shown when not found", f.xmiss),
-        field("Lookup source key", f.mlookup), field("Lookup column with the same value", f.mcol), field("Aging date column (primary report)", f.agecol, "Aging = execution date minus this date, in days"))),
+        field("Lookup source key", f.mlookup), field("Lookup column with the same value", f.mcol), field("Aging date column (primary report)", f.agecol, "Aging = execution date minus this date, in days; empty = no aging")),
+      kept.length ? h("div", { class: "subsection" }, h("p", { class: "hint", text: "Also part of this definition and kept unchanged when you save (not editable here):" }),
+        h("ul", { class: "hint" }, ...kept.map((x) => h("li", { text: x })))) : null),
     h("section", { class: "card form-card" }, h("h2", { text: "4. Output columns (in this order)" }),
       h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Heading", "Value", "Type", ""].map((x) => h("th", { text: x })))), outBody)),
       h("div", { class: "actions" }, addOutBtn, refresh),
