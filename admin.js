@@ -165,6 +165,10 @@ function placeholderBar(target) {
     } })));
 }
 
+// BCC is never entered on a task: the database adds every assigned employee to BCC when an e-mail is queued.
+const withoutBcc = (em) => { const { bcc: _bcc, ...rest } = em || {}; return rest; };
+const BCC_NOTE = "BCC is not set here: every assigned employee is added to BCC automatically when the e-mail is sent.";
+
 function previewEmail(o) {
   const fill = (txt) => txt.replace(/\{([a-z_]+)\}/g, (m, k) => (k in o.values ? o.values[k] : m));
   const close = () => overlay.remove();
@@ -172,7 +176,7 @@ function previewEmail(o) {
   const overlay = h("div", { class: "overlay", onclick: (e) => { if (e.target === overlay) close(); } },
     h("div", { class: "modal" }, h("header", {}, h("h3", { text: "E-mail preview (sample values)" }), h("button", { type: "button", class: "small secondary", text: "Close", onclick: close })),
       h("div", { class: "body" },
-        h("dl", { class: "dl" }, row("To", o.to.join(", ")), row("CC", o.cc.join(", ")), row("BCC", o.bcc.join(", ")),
+        h("dl", { class: "dl" }, row("To", o.to.join(", ")), row("CC", o.cc.join(", ")), row("BCC", "Assigned employees (added automatically)"),
           row("Subject", o.subject ? fill(o.subject) : "(standard subject: report name and period)"),
           row("Content", { attachment: "Excel attachment", body: "Data table in the e-mail", both: "Data table and Excel attachment" }[o.format])),
         h("div", { class: "preview-body", text: o.body ? fill(o.body) : "(standard report text is used when the body is left empty)" }),
@@ -282,7 +286,7 @@ async function editTask(id) {
   if (!conn) { alert("No active SAP connection configured."); return; }
   let t = { name: "", description: "", execution_target: "live_sap", execution_mode: "manual_only", status: "active" };
   let cfg = null;                                   // the task's OWN saved copy of the report configuration
-  let em = { enabled: false, to: [], cc: [], bcc: [], subject: "", body: "", failure_subject: "", failure_body: "",
+  let em = { enabled: false, to: [], cc: [], subject: "", body: "", failure_subject: "", failure_body: "",
              notify_success: true, notify_failure: false, delivery_format: "attachment" };
   let sc = null, asg = [];
   const templates = await api("/report_templates?select=id,name,description,version,config,status&order=name");
@@ -313,7 +317,7 @@ async function editTask(id) {
     efmt: sel(em.delivery_format, [["attachment", "Excel attachment only"], ["body", "Data table in the e-mail body only"], ["both", "Data table and Excel attachment"]]),
   };
   f.ebody.value = em.body || ""; f.fbody.value = em.failure_body || "";
-  const rTo = emailChips(asList(em.to), "name@company.com"), rCc = emailChips(asList(em.cc), "Add CC"), rBcc = emailChips(asList(em.bcc), "Add BCC");
+  const rTo = emailChips(asList(em.to), "name@company.com"), rCc = emailChips(asList(em.cc), "Add CC");
 
   // ---- Report Template (the task keeps its own copy/version of the template configuration)
   const tplLabel = (x) => `${tplName(x)}${x.status === "active" ? "" : " (inactive)"}`;
@@ -385,7 +389,7 @@ async function editTask(id) {
     const c = currentConfig() || {}, r = periodRange(c.date_rule, c.custom_from, c.custom_to);
     const d = (x) => x ? `${String(x.getUTCDate()).padStart(2, "0")}.${String(x.getUTCMonth() + 1).padStart(2, "0")}.${x.getUTCFullYear()}` : "-";
     const firstEmp = assignBoxes.find((x) => x.box.checked);
-    previewEmail({ to: rTo.values(), cc: rCc.values(), bcc: rBcc.values(), subject: f.esub.value.trim(), body: f.ebody.value, format: f.efmt.value,
+    previewEmail({ to: rTo.values(), cc: rCc.values(), subject: f.esub.value.trim(), body: f.ebody.value, format: f.efmt.value,
       values: { report_name: reportName() || "Report", task_name: reportName() || f.name.value.trim(),
                 period_start: d(r && r[0]), period_end: d(r && r[1]),
                 execution_date: new Date(Date.now() + 5 * 3600000).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }).replace(/ /g, "-"),
@@ -395,8 +399,8 @@ async function editTask(id) {
   const form = h("form", { class: "task-form", onsubmit: async (e) => {
     e.preventDefault(); err.textContent = ""; save.disabled = true;
     try {
-      const to = rTo.values(), cc = rCc.values(), bcc = rBcc.values();
-      if (rTo.pendingInvalid() || rCc.pendingInvalid() || rBcc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
+      const to = rTo.values(), cc = rCc.values();
+      if (rTo.pendingInvalid() || rCc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
       if (f.eon.checked && !to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
       const config = currentConfig();
       if (!config) throw new Error("Choose a report name.");
@@ -411,7 +415,7 @@ async function editTask(id) {
                        : (await api("/tasks", { method: "POST", body: JSON.stringify({ ...row, created_by: me.user_id }), headers: { prefer: "return=representation" } }))[0];
       const tid = saved.id;
       // same e-mail record as before (arrays of addresses + the existing fields), so delivery is unchanged
-      const email = { ...em, enabled: f.eon.checked, to, cc, bcc, subject: f.esub.value.trim(), body: f.ebody.value, failure_subject: f.fsub.value.trim(),
+      const email = { ...withoutBcc(em), enabled: f.eon.checked, to, cc, subject: f.esub.value.trim(), body: f.ebody.value, failure_subject: f.fsub.value.trim(),
                       failure_body: f.fbody.value, notify_success: f.nsucc.checked, notify_failure: f.nfail.checked,
                       delivery_format: f.efmt.value, format_version: 2 };
       await upsert("task_configs", { task_id: tid, config, email }, "task_id");
@@ -457,7 +461,7 @@ async function editTask(id) {
   const subjField = field("Subject", f.esub, "");
   const subjHint = subjField.querySelector(".hint") || subjField.appendChild(h("span", { class: "hint" }));
   emailBody.append(
-    h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el), field("BCC", rBcc.el, "Press Enter or Add; paste several addresses separated by commas or semicolons.")),
+    h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el, "Press Enter or Add; paste several addresses separated by commas or semicolons."), h("p", { class: "hint", text: BCC_NOTE })),
     h("div", { class: "grid-2" }, field("Delivery format", f.efmt), h("div", {})),
     subjField,
     h("label", { class: "field" }, "Body", placeholderBar(f.ebody), f.ebody),

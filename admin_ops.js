@@ -533,7 +533,7 @@ async function editDynamicTask(id) {
   let t = { name: "", description: "", execution_target: "live_sap", execution_mode: "scheduled_and_manual", status: "active",
             dynamic_report_id: null, dynamic_report_version: null };
   let cfg = null;                                   // the task's OWN saved copy of the definition (what runs use)
-  let em = { enabled: false, to: [], cc: [], bcc: [], subject: "", body: "", failure_subject: "", failure_body: "",
+  let em = { enabled: false, to: [], cc: [], subject: "", body: "", failure_subject: "", failure_body: "",
              notify_success: true, notify_failure: false, delivery_format: "attachment" };
   let sc = null, asg = [];
   const defs = await api("/dynamic_reports?select=id,name,description,version,status,config&order=name");
@@ -563,7 +563,7 @@ async function editDynamicTask(id) {
     nsucc: chk(em.notify_success), nfail: chk(em.notify_failure),
   };
   f.ebody.value = em.body || "";
-  const rTo = emailChips((em.to || []), "name@company.com"), rCc = emailChips(em.cc || [], "Add CC"), rBcc = emailChips(em.bcc || [], "Add BCC");
+  const rTo = emailChips((em.to || []), "name@company.com"), rCc = emailChips(em.cc || [], "Add CC");
   // A definition chosen in this edit (or "use the latest version") is copied into the task on save; otherwise the
   // task keeps its own saved copy - exactly like static report templates.
   const pendingDef = () => { const x = defs.find((y) => y.id === f.def.value);
@@ -596,8 +596,8 @@ async function editDynamicTask(id) {
       const pend = pendingDef();
       const config = pend ? dynConfigForTask(pend) : cfg;
       if (!config) throw new Error("Choose a dynamic report.");
-      const to = rTo.values(), cc = rCc.values(), bcc = rBcc.values();
-      if (rTo.pendingInvalid() || rCc.pendingInvalid() || rBcc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
+      const to = rTo.values(), cc = rCc.values();
+      if (rTo.pendingInvalid() || rCc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
       if (f.eon.checked && !to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
       const keep = !pend && f.def.value === (t.dynamic_report_id || "");
       const row = { name: f.name.value.trim(), description: pend ? dynName(pend) : (config.report_name || t.description || null),
@@ -608,7 +608,7 @@ async function editDynamicTask(id) {
       const saved = id ? (await api(`/tasks?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(row), headers: { prefer: "return=representation" } }))[0]
                        : (await api("/tasks", { method: "POST", body: JSON.stringify({ ...row, report_kind: "dynamic", created_by: me.user_id }), headers: { prefer: "return=representation" } }))[0];
       const tid = saved.id;
-      const email = { ...em, enabled: f.eon.checked, to, cc, bcc, subject: f.esub.value.trim(), body: f.ebody.value,
+      const email = { ...withoutBcc(em), enabled: f.eon.checked, to, cc, subject: f.esub.value.trim(), body: f.ebody.value,
                       notify_success: f.nsucc.checked, notify_failure: f.nfail.checked, delivery_format: f.efmt.value, format_version: 2 };
       await upsert("task_configs", { task_id: tid, config, email }, "task_id");
       if (f.freq.value) {
@@ -637,7 +637,7 @@ async function editDynamicTask(id) {
     h("section", { class: "card form-card" }, h("h2", { text: "3. Assigned employees" }), picker.el,
       h("p", { class: "hint", text: "SAP is accessed with the run owner's own saved SAP password; each source report uses the same SAP user." })),
     h("section", { class: "card form-card" }, h("div", { class: "card-head" }, h("h2", { text: "4. E-mail" }), h("label", { class: "toggle" }, f.eon, " Send report e-mail")),
-      h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el), field("BCC", rBcc.el)),
+      h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el), h("p", { class: "hint", text: BCC_NOTE })),
       h("div", { class: "grid-2" }, field("Delivery format", f.efmt), h("div", {})), field("Subject", f.esub),
       h("label", { class: "field" }, "Body", placeholderBar(f.ebody), f.ebody),
       h("div", { class: "grid-2" }, field("Send the report e-mail when the run succeeds", f.nsucc), field("Send a failure e-mail when the run fails", f.nfail)),
@@ -689,7 +689,7 @@ async function editPackTask(id) {
   if (!conn) { alert("No active SAP connection configured."); return; }
   let t = { name: "", description: "", execution_target: "live_sap", execution_mode: "scheduled_and_manual", status: "active" };
   let cfg = packBlankConfig();
-  let em = { enabled: true, to: [], cc: [], bcc: [], subject: "{report_name} - {period_month}", body: "", failure_subject: "", failure_body: "",
+  let em = { enabled: true, to: [], cc: [], subject: "{report_name} - {period_month}", body: "", failure_subject: "", failure_body: "",
              notify_success: true, notify_failure: true, delivery_format: "attachment" };
   let sc = null, asg = [];
   if (id) {
@@ -712,7 +712,7 @@ async function editPackTask(id) {
     nsucc: chk(em.notify_success), nfail: chk(em.notify_failure),
   };
   f.ebody.value = em.body || "";
-  const rTo = emailChips(em.to || [], "name@company.com"), rCc = emailChips(em.cc || [], "Add CC"), rBcc = emailChips(em.bcc || [], "Add BCC");
+  const rTo = emailChips(em.to || [], "name@company.com"), rCc = emailChips(em.cc || [], "Add CC");
 
   // ---- SAP reports (run in this order; each one's own Excel export becomes one attachment)
   const box = h("div", {});
@@ -782,8 +782,8 @@ async function editPackTask(id) {
     e.preventDefault(); err.textContent = ""; save.disabled = true;
     try {
       if (!f.name.value.trim() || !f.title.value.trim()) throw new Error("Report title and task name are required.");
-      const to = rTo.values(), cc = rCc.values(), bcc = rBcc.values();
-      if (rTo.pendingInvalid() || rCc.pendingInvalid() || rBcc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
+      const to = rTo.values(), cc = rCc.values();
+      if (rTo.pendingInvalid() || rCc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
       if (f.eon.checked && !to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
       const config = build();
       const problems = await api("/rpc/pack_config_problems", { method: "POST", body: JSON.stringify({ p_config: config }) });
@@ -794,7 +794,7 @@ async function editPackTask(id) {
                        : (await api("/tasks", { method: "POST", body: JSON.stringify({ ...row, report_kind: "month_end_pack", created_by: me.user_id }), headers: { prefer: "return=representation" } }))[0];
       const tid = saved.id;
       // Excel attachments only: never a data table in the body
-      const email = { ...em, enabled: f.eon.checked, to, cc, bcc, subject: f.esub.value.trim(), body: f.ebody.value,
+      const email = { ...withoutBcc(em), enabled: f.eon.checked, to, cc, subject: f.esub.value.trim(), body: f.ebody.value,
                       notify_success: f.nsucc.checked, notify_failure: f.nfail.checked, delivery_format: "attachment", format_version: 2 };
       await upsert("task_configs", { task_id: tid, config, email }, "task_id");
       if (f.freq.value) {
@@ -827,7 +827,7 @@ async function editPackTask(id) {
     h("section", { class: "card form-card" }, h("h2", { text: "4. Assigned employees" }), picker.el,
       h("p", { class: "hint", text: "SAP is accessed with the run owner's own saved SAP password; the e-mail is sent as that employee's address." })),
     h("section", { class: "card form-card" }, h("div", { class: "card-head" }, h("h2", { text: "5. E-mail" }), h("label", { class: "toggle" }, f.eon, " Send report e-mail")),
-      h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el), field("BCC", rBcc.el)), field("Subject", f.esub),
+      h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el), h("p", { class: "hint", text: BCC_NOTE })), field("Subject", f.esub),
       h("label", { class: "field" }, "Body", placeholderBar(f.ebody), f.ebody),
       h("div", { class: "grid-2" }, field("Send the e-mail when every report succeeded", f.nsucc), field("Send a failure e-mail when the run fails", f.nfail)),
       h("p", { class: "hint", text: "Attachments: the Excel files only. {period_month} is the reporting month, e.g. Oct-26." })),
