@@ -443,16 +443,103 @@ async function employeeDashboard() {
                 ["Due", (o) => fmt(o.due_at)], ["Status", (o) => badge(o.status)]], occ.slice(0, 10), "No runs in the last 7 days."))];
 }
 
+// ------------------------------------------------------------------ My Tasks: the assigned employee's task editor
+// Task name, e-mail settings and schedule only, saved by bah.employee_save_task (the database checks that the caller is
+// an active assignee and accepts nothing else). The report, run target, run mode, status, the administrator's
+// "run on schedule" switch and the assigned employees are shown read-only: only an administrator can change them.
+const MY_FREQS = { standard: [["daily", "Daily"], ["weekly", "Weekly"], ["fortnightly", "Every 14 days"], ["monthly", "Monthly"]],
+                   dynamic: [["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]], month_end_pack: [["monthly", "Monthly"]] };
+const MY_KIND = { standard: "Static report", dynamic: "Dynamic report", month_end_pack: "Monthly Reporting Working" };
+async function editMyTask(id) {
+  const t = await api("/rpc/my_task_for_edit", { method: "POST", body: JSON.stringify({ p_task: id }) });
+  const em = t.email || {}, sc = t.schedule && t.schedule.status !== "inactive" ? t.schedule : null;
+  const kind = MY_FREQS[t.report_kind] ? t.report_kind : "standard", pack = kind === "month_end_pack";
+  const ro = (value) => inp(value, { disabled: true, readonly: true });
+  const f = {
+    name: inp(t.name, { maxlength: "120", required: true }),
+    freq: sel(sc ? sc.frequency : "", [["", "No schedule (manual only)"], ...MY_FREQS[kind]]),
+    time: inp(sc ? sc.run_time : "08:00", { type: "time" }),
+    weekday: sel(String((sc && sc.weekday) || 1), WEEKDAYS.slice(1).map((d, i) => [String(i + 1), d])),
+    mday: inp((sc && sc.month_day) || 1, { type: "number", min: "1", max: "31" }),
+    lastday: chk(sc && sc.last_day_of_month), anchor: inp((sc && sc.anchor_date) || "", { type: "date" }),
+    eon: chk(em.enabled), esub: inp(em.subject || "", { maxlength: "300" }),
+    ebody: h("textarea", { class: "email-body", rows: "8", placeholder: "Leave empty to use the standard report text." }),
+    fsub: inp(em.failure_subject || "", { maxlength: "300", placeholder: "Leave empty for the standard failure subject" }),
+    fbody: h("textarea", { class: "email-body short", rows: "5", placeholder: "Leave empty for the standard failure text" }),
+    efmt: sel(pack ? "attachment" : (em.delivery_format || "attachment"), pack ? [["attachment", "Excel attachments"]]
+      : [["attachment", "Excel attachment"], ["body", "Data table in the e-mail"], ["both", "Data table and Excel attachment"]]),
+    nsucc: chk(em.notify_success !== false), nfail: chk(em.notify_failure),
+  };
+  f.ebody.value = em.body || ""; f.fbody.value = em.failure_body || "";
+  const rTo = emailChips(em.to || [], "name@company.com"), rCc = emailChips(em.cc || [], "Add CC");
+  // assigned employees: visible to the employee, never editable here (also refused by the database)
+  const assignees = ro((t.assignees || []).join(", ") || "—");
+  const sTime = field("Time (Asia/Karachi)", f.time), sWeek = field("Weekday", f.weekday),
+        sAnchor = field("First run date", f.anchor, "Repeats every 14 days from this date"),
+        sMday = field("Day of month", f.mday), sLast = field("Last day of the month", f.lastday);
+  const schedHint = h("div", { class: "hint" });
+  const syncSched = () => {
+    const v = f.freq.value;
+    sTime.hidden = !v; sWeek.hidden = v !== "weekly"; sAnchor.hidden = v !== "fortnightly";
+    sMday.hidden = v !== "monthly" || f.lastday.checked; sLast.hidden = v !== "monthly";
+    schedHint.textContent = !v ? "No automatic runs; use Run Now."
+      : t.scheduled_live_enabled ? "This task runs on schedule." : "Saved, but scheduled runs start only after an administrator switches this task to run on schedule.";
+  };
+  for (const el of [f.freq, f.lastday]) el.addEventListener("change", syncSched);
+  syncSched();
+  const err = h("div", { class: "err" });
+  const save = h("button", { class: "primary", text: "Save changes" });
+  const form = h("form", { class: "task-form", onsubmit: async (e) => {
+    e.preventDefault(); err.textContent = ""; save.disabled = true;
+    try {
+      const to = rTo.values(), cc = rCc.values();
+      if (rTo.pendingInvalid() || rCc.pendingInvalid()) throw new Error("Correct or remove the invalid e-mail addresses first.");
+      if (!f.name.value.trim()) throw new Error("Task name is required.");
+      if (f.eon.checked && !to.length) throw new Error("E-mail is enabled - add at least one 'To' recipient.");
+      if (f.freq.value === "fortnightly" && !f.anchor.value) throw new Error("Every 14 days needs a first run date.");
+      const email = { enabled: f.eon.checked, to, cc, subject: f.esub.value.trim(), body: f.ebody.value,
+                      failure_subject: f.fsub.value.trim(), failure_body: f.fbody.value,
+                      notify_success: f.nsucc.checked, notify_failure: f.nfail.checked, delivery_format: f.efmt.value };
+      const v = f.freq.value;
+      const schedule = !v ? null : { frequency: v, run_time: f.time.value || "08:00",
+        weekday: v === "weekly" ? Number(f.weekday.value) : null, anchor_date: v === "fortnightly" ? f.anchor.value : null,
+        month_day: v === "monthly" && !f.lastday.checked ? Number(f.mday.value) : null, last_day_of_month: v === "monthly" && f.lastday.checked };
+      await api("/rpc/employee_save_task", { method: "POST", body: JSON.stringify({ p_task: id, p_name: f.name.value.trim(), p_email: email, p_schedule: schedule }) });
+      tab = "tasks"; render();
+    } catch (x) { err.textContent = x.message; } finally { save.disabled = false; }
+  } },
+    pageHead(`Edit task: ${t.name}`, "Your task's name, schedule and e-mail. The report and the assigned employees are managed by an administrator."),
+    h("section", { class: "card form-card" }, h("h2", { text: "1. Task details" }),
+      h("div", { class: "grid-2" },
+        field("Task name", f.name, "Your own name for this task."),
+        field("Report", ro(t.report), "Set by an administrator."),
+        field("Report type", ro(MY_KIND[kind])),
+        field("Assigned employees", assignees, "Only an administrator can change the assigned employees."),
+        field("Runs on schedule", ro(t.scheduled_live_enabled ? "Yes" : "No - an administrator switches this on")))),
+    h("section", { class: "card form-card" }, h("h2", { text: "2. Schedule" }),
+      h("div", { class: "grid-3" }, field("Frequency", f.freq), sTime, sWeek, sAnchor, sMday, sLast), schedHint),
+    h("section", { class: "card form-card" }, h("h2", { text: "3. E-mail" }),
+      h("div", { class: "grid-2" }, field("Send e-mail", f.eon), field("Delivery format", f.efmt)),
+      h("div", { class: "grid-1" }, field("To", rTo.el), field("CC", rCc.el), h("p", { class: "hint", text: BCC_NOTE })),
+      h("div", { class: "grid-1" }, field("Subject", f.esub), field("Body", f.ebody)),
+      h("div", { class: "grid-2" }, field("E-mail when the report succeeds", f.nsucc), field("E-mail when the report fails", f.nfail)),
+      h("div", { class: "grid-1" }, field("Failure subject", f.fsub), field("Failure body", f.fbody))),
+    err,
+    h("div", { class: "sticky-actions" }, h("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => { tab = "tasks"; render(); } }), save));
+  mainArea().replaceChildren(form);
+}
+
 // ------------------------------------------------------------------ employee Run Now (own assigned tasks only)
 // bah.employee_run_now creates the run for the signed-in employee's own assignment; it executes only on that
 // employee's runner with the SAP password stored on their PC. Live SAP: explicit confirmation + all server checks.
 function runNowCell(t, ctx, openRun) {
   const status = h("div", { class: "hint" });
   const details = h("button", { class: "secondary small", text: "Details", onclick: () => taskDetail(t) });
+  const edit = h("button", { class: "secondary small", text: "Edit", onclick: () => editMyTask(t.id).catch((x) => { status.textContent = x.message; }) });
   const manual = t.status === "active" && t.execution_mode !== "scheduled_only";
   const btn = manual ? h("button", { class: "small", text: "Run Now", disabled: !!openRun, onclick: () => runNowSelf(t, ctx, btn, status) }) : null;
   if (openRun) watchRun(openRun.id, btn, status, ctx.shared);
-  return h("div", {}, h("div", { class: "actions" }, details, btn), status);
+  return h("div", {}, h("div", { class: "actions" }, details, edit, btn), status);
 }
 
 async function runNowSelf(t, ctx, btn, status) {
