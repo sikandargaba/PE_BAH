@@ -372,9 +372,11 @@ async function editDynamicReport(id) {
   if (d.extract.separators) kept.push(`separators ${d.extract.separators.join(" ")}`);
   if (d.extract.plain) kept.push("also the unseparated full-length value");
   if (d.extract.on_ambiguous === "invalid") kept.push("a text with two different values gives no value");
+  if ((d.aging || {}).if_invalid === "blank") kept.push("aging left blank when its date is empty or not a date");
   if (d.match.on_missing === "unmatched") kept.push(`values not in the lookup report are ${d.match.unmatched_rows === "exclude" ? "left out" : "kept"}`);
   for (const c of d.columns) {
-    const x = [c.if_unmatched ? `"${c.if_unmatched}" when not found` : "", c.decimals !== undefined ? `${c.decimals} decimals` : "", c.total ? "Total row" : ""].filter(Boolean);
+    const x = [c.if_unmatched ? `"${c.if_unmatched}" when not found` : "", c.decimals !== undefined ? `${c.decimals} decimals` : "", c.total ? "Total row" : "",
+               c.if_invalid === "blank" ? "blank when empty or not a date" : ""].filter(Boolean);
     if (x.length) kept.push(`${c.heading}: ${x.join(", ")}`);
   }
 
@@ -455,12 +457,13 @@ async function editDynamicReport(id) {
     if (!extract.separator && extract.separators) delete extract.separator;            // "separators" is used instead
     const dyn = { ...d, version: 1, sources: srcs, extract,
       match: { ...d.match, value: f.xname.value.trim(), lookup: f.mlookup.value.trim(), column: f.mcol.value.trim(), length: len, combine: "distinct_comma" },
-      aging: { column: f.agecol.value.trim() },
+      aging: { ...d.aging, column: f.agecol.value.trim() },     // keeps if_invalid "blank" (runner 1.2.8)
       columns: outRows.map((r) => {
         const type = r.value.value === "aging" ? "integer" : r.type.value;
         const extra = { ...r.extra };
         if (type !== "number") { delete extra.decimals; delete extra.total; }             // number-only options
         if (type !== "text") delete extra.if_unmatched;                                    // text-only option
+        if (type !== "date") delete extra.if_invalid;                                      // date-only option (1.2.8)
         return { heading: r.heading.value.trim(), value: r.value.value, ...(type !== "text" ? { type } : {}), ...extra }; }),
       sort: f.sortcol.value ? [{ heading: f.sortcol.value, direction: f.sortdir.value }] : [] };
     if (!dyn.aging.column) delete dyn.aging;                   // no aging rule (runner 1.2.6+)
