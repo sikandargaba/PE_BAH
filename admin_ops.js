@@ -43,8 +43,8 @@ function inviteEmployeeForm() {
           h("div", { class: "actions" }, h("button", { type: "button", class: "secondary", text: "Copy link", onclick: async (ev) => {
             try { await navigator.clipboard.writeText(link.value); ev.target.textContent = "Copied"; } catch { link.select(); } } }),
             h("button", { type: "button", class: "secondary", text: "Done (hide link)", onclick: () => { link.value = ""; out.replaceChildren(); render(); } })),
-          h("p", { class: "hint", text: "Lost it? Use Create setup link in the Employees table or New setup link under Invitations (a new link replaces this one)." }));
-      } else out.append(h("p", { class: "hint", text: "No link was generated - use New setup link under Invitations." }));
+          h("p", { class: "hint", text: "Lost it? Use Create setup link in the Employees table (a new link replaces this one)." }));
+      } else out.append(h("p", { class: "hint", text: "No link was generated - use Create setup link in the Employees table." }));
     } catch (x) { out.append(h("div", { class: "error", text: `Not created: ${x.message}` })); }
     finally { btn.disabled = false; }
   } }, field("Full name", name), field("Official e-mail", email), field("Employee code", code), btn,
@@ -842,5 +842,36 @@ async function editPackTask(id) {
   picker.start();
 }
 
-Object.assign(ADMIN_VIEWS, { admin_dynamic: adminDynamicReports, admin_month_end: adminMonthEnd, admin_people: adminPeopleV2, admin_invitations: adminInvitations, admin_credentials: adminCredentials,
+// ------------------------------------------------------------------ Runner Management (admin only)
+// One page for the shared BAH runner, in tabs: the former Runner & Releases (central runner, Activate New Runner,
+// releases), VM Management and BAH Runner (package download and installation) pages. Each tab is the unchanged view;
+// the open tab is remembered, so actions that re-render the page (save VM, activate ...) come back to it.
+const RUNNER_TABS = [["central", "Central runner & releases", () => adminReleases()],
+  ["vm", "VM", () => adminVms()], ["package", "Runner package", () => runnerPage()]];
+let runnerTab = "central";
+async function adminRunnerManagement() {
+  const panel = h("div", { class: "tab-panel", role: "tabpanel" });
+  const bar = h("div", { class: "tabbar", role: "tablist", "aria-label": "Runner management" });
+  let shown = 0;
+  const show = async (key) => {
+    const mine = ++shown;
+    runnerTab = key;
+    for (const b of bar.children) { const on = b.dataset.key === key; b.classList.toggle("on", on); b.setAttribute("aria-selected", String(on)); }
+    panel.replaceChildren(h("div", { class: "empty", text: "Loading…" }));
+    let nodes;
+    try {
+      const out = await RUNNER_TABS.find((t) => t[0] === key)[2]();
+      const paged = !Array.isArray(out), acts = paged ? out.actions || [] : [];
+      nodes = [acts.length ? h("div", { class: "actions tab-actions" }, acts) : null, ...(paged ? out.content : out)].filter(Boolean);
+    } catch (x) { nodes = [h("div", { class: "notice warn", text: x.message })]; }
+    if (mine === shown) panel.replaceChildren(...nodes);          // a later tab click wins
+  };
+  for (const [key, label] of RUNNER_TABS) {
+    bar.append(h("button", { type: "button", class: "secondary tab", role: "tab", "data-key": key, onclick: () => show(key) }, label));
+  }
+  await show(RUNNER_TABS.some((t) => t[0] === runnerTab) ? runnerTab : "central");
+  return [bar, panel];
+}
+
+Object.assign(ADMIN_VIEWS, { admin_runner_mgmt: adminRunnerManagement, admin_dynamic: adminDynamicReports, admin_month_end: adminMonthEnd, admin_people: adminPeopleV2, admin_invitations: adminInvitations, admin_credentials: adminCredentials,
   admin_vms: adminVms, admin_system: adminSystemJobs, admin_audit: adminAudit });

@@ -178,7 +178,7 @@ async function start() {
 // Navigation: same sections, labels and layout as the local BAH portal (static/js/admin.js / employee.js nav).
 // [key, label, subtitle] - a string entry is a section heading.
 const TABS = ["My work", ["dashboard", "My Dashboard", "Your tasks, recent runs and report e-mails at a glance."],
-  ["tasks", "My Tasks", "Your report tasks, schedules and next runs."],
+  ["tasks", "My Tasks", "Your report tasks and their schedules."],
   ["runs", "My Jobs", "Every run of your tasks: queued, running, completed and failed."], ["reports", "Reports", "Validated workbooks available to download."],
   ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH for your tasks."],
   "Account", ["sap_credentials", "My SAP Credentials", "Save, test, replace or remove the SAP password BAH uses for your reports."],
@@ -215,7 +215,7 @@ const ICONS = {
 const NAV_ICON = { sap_credentials: "key", profile: "user", admin_invitations: "invite", admin_credentials: "key", admin_vms: "server",
   admin_system: "clock", admin_audit: "shield", admin_dashboard: "dashboard", dashboard: "dashboard", admin_templates: "templates", admin_dynamic: "layers", admin_month_end: "calendar", admin_tasks: "tasks", tasks: "tasks",
   admin_people: "users", runner: "runner", admin_runs: "history", runs: "history", reports: "reports", notifications: "mail",
-  admin_releases: "releases", admin_settings: "settings" };
+  admin_releases: "releases", admin_runner_mgmt: "runner", admin_settings: "settings" };
 // Trusted Types (CSP require-trusted-types-for 'script'): the ONLY markup this portal ever parses is one of the
 // static icons above. The policy refuses everything else, so no other code - ours or injected - can write HTML.
 const ICON_MARKUP = new Map(Object.entries(ICONS).map(([k, v]) =>
@@ -264,7 +264,9 @@ function layout(nav) {
     h("div", { class: "menu-head" }, h("strong", { text: me.full_name }), h("small", { text: ROLE_LABEL() })),
     h("button", { type: "button", class: "menu-item", onclick: () => go("profile") }, icon("user"), "My Profile"),
     h("button", { type: "button", class: "menu-item", onclick: () => go("sap_credentials") }, icon("key"), "My SAP Credentials"),
-    h("button", { type: "button", class: "menu-item", onclick: () => go("runner") }, icon("runner"), "BAH Runner"),
+    h("button", { type: "button", class: "menu-item", onclick: () => {     // administrators: the Runner package tab
+      if (me.is_admin && typeof runnerTab !== "undefined") { runnerTab = "package"; go("admin_runner_mgmt"); } else go("runner"); } },
+      icon("runner"), "BAH Runner"),
     h("button", { type: "button", class: "menu-item danger", onclick: signOut }, icon("logout"), "Sign out"));
   const profileBtn = h("button", { type: "button", class: "profile-btn", "aria-haspopup": "menu", onclick: (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; } },
     h("div", { class: "avatar sm", text: initials(me.full_name) }), h("div", { class: "who" }, h("strong", { text: me.full_name }), h("small", { text: ROLE_LABEL() })), icon("chevron"));
@@ -449,7 +451,7 @@ async function employeeDashboard() {
 // "run on schedule" switch and the assigned employees are shown read-only: only an administrator can change them.
 const MY_FREQS = { standard: [["daily", "Daily"], ["weekly", "Weekly"], ["fortnightly", "Every 14 days"], ["monthly", "Monthly"]],
                    dynamic: [["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]], month_end_pack: [["monthly", "Monthly"]] };
-const MY_KIND = { standard: "Static report", dynamic: "Dynamic report", month_end_pack: "Monthly Reporting Working" };
+const MY_KIND = { standard: "Static report", dynamic: "Dynamic report", month_end_pack: "Monthly reporting" };   // display only
 async function editMyTask(id) {
   const t = await api("/rpc/my_task_for_edit", { method: "POST", body: JSON.stringify({ p_task: id }) });
   const em = t.email || {}, sc = t.schedule && t.schedule.status !== "inactive" ? t.schedule : null;
@@ -605,8 +607,7 @@ const VIEWS = {
       : h("div", { class: "notice warn", text: `Your BAH Runner ${runner.name} is offline (last seen ${fmt(runner.last_seen_at)}). Start it with Start BAH Runner to use Run Now.` });
     return [runnerNote, ...table([["Report", (t) => h("div", {}, h("strong", { text: t.description || t.name }), t.description && t.description !== t.name ? h("div", { class: "muted", text: `Task: ${t.name}` }) : null)],
                   ["Schedule", (t) => schedText((t.schedules || [])[0])],
-                  ["Next run", (t) => nextRun(t)],
-                  ["Type", (t) => targetBadge(t.execution_target)],
+                  ["Type", (t) => targetBadge(t.execution_target)],          // Next run hidden (schedules unchanged)
                   ["Status", (t) => badge(t.status)],
                   ["", (t) => runNowCell(t, ctx, open.find((o) => o.task_id === t.id))]],
                  rows, "No tasks are assigned to you yet.")];

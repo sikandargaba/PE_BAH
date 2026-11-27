@@ -86,7 +86,8 @@ const visibleTask = (id) => !HIDDEN_TASK_IDS.has(id);
 // Tasks = SCHEDULING only (schedule, assignees, e-mail, Run Now). Report definitions live elsewhere: static reports
 // under Static Reports (bah.report_templates), dynamic reports under Dynamic Reports (bah.dynamic_reports). Each task
 // references exactly one definition of its own type, and the two types are listed and edited separately here.
-const REPORT_KIND_LABEL = { dynamic: "Dynamic report", month_end_pack: "Monthly Reporting Working" };
+// Display labels only (stored report_kind values are unchanged): short enough to keep the Tasks table on one line.
+const REPORT_KIND_LABEL = { dynamic: "Dynamic report", month_end_pack: "Monthly reporting" };
 const reportKindTag = (t) => h("span", { class: `badge ${REPORT_KIND_LABEL[t.report_kind] ? "info" : ""}`,
                                          text: REPORT_KIND_LABEL[t.report_kind] || "Static report" });
 const editReport = (t) => t.report_kind === "dynamic" ? editDynamicTask(t.id)
@@ -108,7 +109,7 @@ async function adminTasks() {
   // ONE table for static and dynamic report tasks; the Report type column tells them apart.
   const cols = [["Task", (t) => h("strong", { text: t.name })],
     ["Report type", reportKindTag], ["SAP report(s)", sapText],
-    ["Schedule", schedShort], ["Next run", (t) => nextRun(t)], ["On schedule", onSchedule],
+    ["Schedule", schedShort], ["On schedule", onSchedule],                // Next run hidden (schedules unchanged)
     ["Type", (t) => targetBadge(t.execution_target)],
     ["Assignments", (t) => (t.assignments || []).filter((a) => a.status === "active").map((a) => name(a.employee_id)).join(", ") || "—"],
     ["", (t) => h("div", { class: "actions" },
@@ -813,7 +814,7 @@ function editTemplate(t) {
   refresh();
 }
 
-// ------------------------------------------------------------------ Runner & Releases (admin only)
+// ------------------------------------------------------------------ Runner & Releases (admin only; a Runner Management tab)
 // The central (shared) BAH runner and the runner releases on one page. Employee machines are not monitored here.
 // Packages are published by the release process (one-time uploader + checksum check), not from the browser, so
 // there is no upload, download or retire button; release records and their status steps are unchanged.
@@ -949,7 +950,7 @@ async function adminReleases() {
   };
   return [
     ...(central.length ? central.map(runnerCard)
-      : [h("div", { class: "notice warn", text: "No central (shared) BAH runner is registered. See VM Management." })]),
+      : [h("div", { class: "notice warn", text: "No central (shared) BAH runner is registered. See the VM tab." })]),
     activationCard(central, rels, stable, acts, minRunner),
     h("div", { class: "notice", text: stable ? `Latest Stable release: ${stable.version}.` : "No Stable release yet." }),
     h("div", { class: "card" }, h("h2", { text: "Releases" }),
@@ -970,14 +971,11 @@ const ADMIN_TABS = ["Overview", ["admin_dashboard", "Dashboard", "Operational ov
   ["admin_month_end", "Monthly Reporting Workings", "Month-end closing packs: several SAP reports for the previous month, each e-mailed as its own Excel file."],
   ["admin_tasks", "Tasks", "Schedules, assignees and e-mail for static reports, dynamic reports and monthly reporting workings."],
   "People & access", ["admin_people", "Employees", "Accounts, invitations, registration, SAP user IDs and each employee's runner."],
-  ["admin_invitations", "Invitations", "Pending, registered, expired and revoked invitations."],
-  ["admin_credentials", "SAP Credentials", "Which employees have a usable SAP password saved for the shared runner (status only)."],
-  "Execution", ["admin_vms", "VM Management", "The VM that hosts the shared BAH runner: address, runner, sealing key and health."],
-  ["admin_releases", "Runner & Releases", "The central BAH runner (status, version, last check-in) and the runner releases."],
-  ["runner", "BAH Runner", "Download, install and update the BAH Runner on your PC."],
+  // Invitations, SAP Credentials (status) and System Jobs are no longer in the menu (their views stay defined; the
+  // Employees page covers setup links, deactivation and each employee's SAP password status).
+  "Execution", ["admin_runner_mgmt", "Runner Management", "The shared BAH runner: status, activation and releases, the VM that hosts it, and the runner package."],
   "Monitoring", ["admin_runs", "Execution History", "Every run, including report runs handed over by the local BAH."],
   ["reports", "Reports", "Validated workbooks stored in the cloud."], ["notifications", "E-mail Notifications", "Report e-mails sent by the cloud BAH."],
-  ["admin_system", "System Jobs", "Scheduled database jobs and the health of every BAH queue."],
   ["admin_audit", "Audit Logs", "Who did what and when - read-only."],
   "System", ["admin_settings", "Settings", "Live SAP authorisation and cloud e-mail sending."],
   "My account", ["sap_credentials", "My SAP Credentials", "Save, test, replace or remove the SAP password BAH uses for your reports."],
